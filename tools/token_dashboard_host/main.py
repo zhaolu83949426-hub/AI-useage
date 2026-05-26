@@ -1,16 +1,21 @@
 """Token 用量看板 - Main entry point with 5-minute refresh scheduler."""
 
 import asyncio
+import hashlib
+import json
 import logging
+import os
 import sys
 from datetime import datetime
 
-from .config import REFRESH_INTERVAL_SECONDS
+from .config import REFRESH_INTERVAL_SECONDS, TOKEN_DASHBOARD_RENDER_MODE
 from .collectors.aiusage import collect_today_usage
 from .collectors.glm_plan import collect_glm_plan
 from .collectors.gpt_plan import collect_gpt_plan
 from .renderer.dashboard import render_dashboard, DashboardData
 from .renderer.bitmap import rgb_to_bitplanes
+from .renderer.snapshot import DashboardSnapshot, DeviceStatus, ModelUsage
+from .renderer.firmware_render import encode_with_crc
 from .ble.transport import BLETransport
 
 logging.basicConfig(
@@ -21,8 +26,168 @@ logging.basicConfig(
 logger = logging.getLogger("dashboard")
 
 
+def _build_dashboard_snapshot(
+    usage,
+    glm_plan,
+    gpt_plan,
+    device_status: DeviceStatus | None,
+    last_refresh: str,
+) -> DashboardSnapshot:
+    """Build unified DashboardSnapshot from collected data."""
+    now = datetime.now()
+    generated_at = now.isoformat()
+
+    # Convert ModelUsage to snapshot format (add share_percent if missing)
+    models = []
+    total_tokens = usage.total_tokens or 1
+    for m in usage.top_models[:4]:
+        share_percent = getattr(m, "share_percent", None)
+        if share_percent is None:
+            share_percent = round(m.total_tokens / total_tokens * 10000) / 100
+        models.append(ModelUsage(
+            model=m.model,
+            provider=m.provider,
+            calls=m.calls,
+            total_tokens=m.total_tokens,
+            share_percent=share_percent,
+        ))
+
+    return DashboardSnapshot(
+        generated_at=generated_at,
+        last_refresh_label=last_refresh,
+        total_tokens=usage.total_tokens,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cache_tokens=usage.cache_read_tokens,
+        glm_plan=glm_plan,
+        gpt_plan=gpt_plan,
+        models=models,
+        device=device_status,
+    )
+
+
+async def _run_bitmap_mode(transport: BLETransport, snapshot: DashboardSnapshot) -> bool:
+    """Execute bitmap mode: render PIL image, send as bitplanes."""
+    # Convert snapshot to legacy DashboardData format
+    from .renderer.dashboard import DashboardData
+    usage = type("TodayUsage", (), {
+        "total_tokens": snapshot.total_tokens,
+        "input_tokens": snapshot.input_tokens,
+        "output_tokens": snapshot.output_tokens,
+        "cache_read_tokens": snapshot.cache_tokens,
+        "top_models": [type("ModelUsage", (), {
+            "model": m.model,
+            "provider": m.provider,
+            "calls": m.calls,
+            "total_tokens": m.total_tokens,
+        })() for m in snapshot.models],
+    })()
+
+    data = DashboardData(
+        usage=usage,
+        glm_plan=snapshot.glm_plan,
+        gpt_plan=snapshot.gpt_plan,
+        device=snapshot.device,
+        last_refresh=snapshot.last_refresh_label,
+    )
+
+    # Render dashboard
+    img = render_dashboard(data)
+
+    # Save debug PNG
+    debug_path = "dashboard_debug.png"
+    img.save(debug_path)
+    logger.info(f"Debug image saved to {debug_path}")
+
+    # Convert to bitplanes
+    black_plane, red_plane = rgb_to_bitplanes(img)
+
+    # Send via BLE
+    logger.info("Sending bitmap image to display...")
+    return await transport.send_3color_image(black_plane, red_plane)
+
+
+async def _run_firmware_render_mode(transport: BLETransport, snapshot: DashboardSnapshot) -> bool:
+    """Execute firmware_render mode: encode snapshot, send structured data."""
+    # Encode snapshot to binary format
+    payload, crc32 = encode_with_crc(snapshot)
+    logger.info(f"Encoded snapshot: {len(payload)} bytes, CRC32={crc32:08X}")
+
+    # Send via BLE
+    logger.info("Sending dashboard snapshot for firmware rendering...")
+    return await transport.send_dashboard_snapshot(payload, crc32, refresh_mode="FULL")
+
+
+# Cache file path
+_CACHE_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".dashboard_cache.json")
+_CACHE_VERSION = "v1"
+
+
+def _snapshot_to_cache_dict(snapshot: DashboardSnapshot) -> dict:
+    """Convert snapshot to dict for caching (exclude device status)."""
+    return {
+        "version": _CACHE_VERSION,
+        "total_tokens": snapshot.total_tokens,
+        "input_tokens": snapshot.input_tokens,
+        "output_tokens": snapshot.output_tokens,
+        "cache_tokens": snapshot.cache_tokens,
+        "glm_plan": {
+            "available": snapshot.glm_plan.available,
+            "five_hour_percent": snapshot.glm_plan.five_hour_percent,
+            "week_percent": snapshot.glm_plan.week_percent,
+            "five_hour_label": snapshot.glm_plan.five_hour_label,
+            "week_label": snapshot.glm_plan.week_label,
+        },
+        "gpt_plan": {
+            "available": snapshot.gpt_plan.available,
+            "five_hour_percent": snapshot.gpt_plan.five_hour_percent,
+            "week_percent": snapshot.gpt_plan.week_percent,
+            "five_hour_label": snapshot.gpt_plan.five_hour_label,
+            "week_label": snapshot.gpt_plan.week_label,
+        },
+        "models": [
+            {
+                "model": m.model,
+                "calls": m.calls,
+                "total_tokens": m.total_tokens,
+                "share_percent": m.share_percent,
+            }
+            for m in snapshot.models
+        ],
+    }
+
+
+def _compute_cache_hash(cache_dict: dict) -> str:
+    """Compute hash of cache dict for comparison."""
+    # Sort keys for consistent hash, convert to JSON
+    cache_str = json.dumps(cache_dict, sort_keys=True)
+    return hashlib.md5(cache_str.encode()).hexdigest()
+
+
+def _load_last_cache() -> dict | None:
+    """Load last cache from file."""
+    if not os.path.exists(_CACHE_FILE):
+        return None
+    try:
+        with open(_CACHE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _save_cache(cache_dict: dict, cache_hash: str) -> None:
+    """Save cache to file."""
+    try:
+        cache_dict["hash"] = cache_hash
+        cache_dict["timestamp"] = datetime.now().isoformat()
+        with open(_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache_dict, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
 async def run_cycle(transport: BLETransport) -> None:
-    """Execute one complete collect-render-send cycle."""
+    """Execute one complete collect-render-send cycle with cache check."""
     # 1. Collect data
     logger.info("Collecting data...")
     usage = collect_today_usage()
@@ -34,37 +199,45 @@ async def run_cycle(transport: BLETransport) -> None:
         logger.warning("Both plans unavailable, skipping this cycle")
         return
 
-    # 3. Connect to device and read status
-    logger.info("Connecting to device...")
-    await transport.connect()
-    device_status = await transport.read_device_status()
-    logger.info(f"Device: WiFi={'connected' if device_status.wifi_connected else 'disconnected'}, "
-                f"battery={device_status.battery_percent}%")
+    # 3. Connect to device and read status (only for bitmap mode)
+    device_status = None
+    if TOKEN_DASHBOARD_RENDER_MODE == "bitmap":
+        logger.info("Connecting to device...")
+        await transport.connect()
+        device_status = await transport.read_device_status()
+        logger.info(f"Device: WiFi={'connected' if device_status.wifi_connected else 'disconnected'}, "
+                    f"battery={device_status.battery_percent}%")
+    elif TOKEN_DASHBOARD_RENDER_MODE == "firmware_render":
+        logger.info("Connecting to device...")
+        await transport.connect()
+        # In firmware_render mode, device reads status locally
 
-    # 4. Render dashboard
+    # 4. Build unified snapshot
     now = datetime.now()
     last_refresh = now.strftime("%H:%M")
+    snapshot = _build_dashboard_snapshot(usage, glm_plan, gpt_plan, device_status, last_refresh)
 
-    data = DashboardData(
-        usage=usage,
-        glm_plan=glm_plan,
-        gpt_plan=gpt_plan,
-        device=device_status,
-        last_refresh=last_refresh,
-    )
-    img = render_dashboard(data)
+    # 5. Cache check: compare with last cycle
+    cache_dict = _snapshot_to_cache_dict(snapshot)
+    cache_hash = _compute_cache_hash(cache_dict)
+    last_cache = _load_last_cache()
 
-    # Save debug PNG
-    debug_path = "dashboard_debug.png"
-    img.save(debug_path)
-    logger.info(f"Debug image saved to {debug_path}")
+    if last_cache and last_cache.get("hash") == cache_hash:
+        logger.info("Data unchanged from last cycle, skipping update")
+        return
 
-    # 5. Convert to bitplanes
-    black_plane, red_plane = rgb_to_bitplanes(img)
+    logger.info("Data changed since last cycle, proceeding with update")
+    _save_cache(cache_dict, cache_hash)
 
-    # 6. Send via BLE
-    logger.info("Sending image to display...")
-    success = await transport.send_3color_image(black_plane, red_plane)
+    # 6. Send based on render mode
+    if TOKEN_DASHBOARD_RENDER_MODE == "bitmap":
+        success = await _run_bitmap_mode(transport, snapshot)
+    elif TOKEN_DASHBOARD_RENDER_MODE == "firmware_render":
+        success = await _run_firmware_render_mode(transport, snapshot)
+    else:
+        logger.error(f"Unknown render mode: {TOKEN_DASHBOARD_RENDER_MODE}")
+        return
+
     logger.info(f"Update {'succeeded' if success else 'failed'}")
 
 

@@ -2,132 +2,200 @@
 
 ## 1. 设计目标
 
-基于当前仓库已具备的 `ESP32 + 4.2 寸 400x300 黑白红三色墨水屏` 固件能力，设计一套最直接、最易落地的方案，实现：
+基于当前仓库已经可用的 `ESP32 + 4.2 寸 400x300 黑白红三色墨水屏 + BLE` 能力，设计一套可直接进入实现的详细方案，实现以下目标：
 
-- 主机侧每 `5 分钟` 聚合 Token 数据；
-- 主机侧生成完整看板图像；
-- 通过 BLE 将图像推送至 ESP32；
-- 设备侧刷新整页墨水屏；
-- 页面内容严格遵守需求文档规定的字段与排版。
+- 保留现有 `主机渲染位图 + BLE 推图` 模式；
+- 新增 `主机采集结构化数据 + BLE 发送快照 + 固件固定模板渲染` 模式；
+- 两种模式共用同一套主机采集逻辑；
+- 在不改变蓝牙传输通道的前提下，将结构化模式的传输耗时压缩到接近 `0s`；
+- 页面字段、颜色规则、刷新规则保持一致。
 
-本设计只采用一种方案：**主机侧聚合数据并渲染整页看板位图，ESP32 侧仅负责接收、显示与提供本机状态数据**。
+本设计只采用一种总体方案：**双模式并存，位图模式保留，固件端渲染模式新增，不做自动切换，不做隐式 fallback。**
 
-## 2. 现状确认
+## 2. 范围
 
-### 2.1 已确认可复用能力
+### 2.1 本次设计覆盖
 
-1. 当前仓库已验证 `esp32-N4 + 4.2 寸 400x300 黑白红三色墨水屏` 可启动、显示和刷新。
-2. 当前仓库 BLE 协议已存在 `DIRECT_WRITE_START / DIRECT_WRITE_DATA / DIRECT_WRITE_END` 图像写入链路，可作为看板图像下发通道。
-3. 本机 `aiusage` 已安装，可通过 `aiusage status` 确认本地 SQLite 数据库路径为：
-   - `C:\Users\zhaolu\.aiusage\cache.db`
-4. `aiusage` 数据库中存在 `records`、`v_usage_records`、`v_sessions` 等视图，足以支撑：
-   - 今日输入/输出/缓存/总量；
-   - 按模型与提供商聚合；
-   - 当日模型 TopN 排序。
+1. Host 侧统一数据模型
+2. 双模式发送路径
+3. 新 BLE 命令协议
+4. 设备侧结构化快照解析
+5. 设备侧固定模板看板渲染
+6. 数据格式、错误码、校验规则
+7. 验收与测试口径
 
-### 2.2 已确认但不能直接用于完整实现的能力
+### 2.2 本次设计不覆盖
 
-1. `GLM CodingPlan` 已确认可通过智谱在线接口获取套餐数据：
-   - `GET https://open.bigmodel.cn/api/monitor/usage/quota/limit`
-   - `Authorization: Bearer <GLM_API_KEY>`
-2. 该接口已返回真实数据，当前 `limits[]` 的界面映射规则已经确认。
-3. 当前 Codex 本地会话日志已确认持续写入 `rate_limits`：
-   - `primary.window_minutes = 300`
-   - `secondary.window_minutes = 10080`
-   - `plan_type = plus`
-4. 因此 GPT Plus 的 `5 小时 / 一周` 套餐进度，已可直接从本机 Codex 会话日志提取，无需额外猜测远程 undocumented 接口。
+1. WiFi 传输方案
+2. 局部刷新协议落地
+3. 通用中文字库系统
+4. 通用 UI 布局引擎
+5. 自动从位图模式降级或升级到固件渲染模式
 
-## 3. 方案选型
+## 3. 现状确认
 
-### 3.1 选定方案
+### 3.1 已确认可复用能力
 
-采用 **主机渲染整页位图 + BLE 全屏下发** 方案。
+1. 当前仓库已验证 `esp32-N4 + 4.2 寸 400x300 黑白红三色墨水屏` 可启动、可整屏刷新。
+2. 当前主机端已经具备：
+   - `aiusage` 今日聚合
+   - GLM 套餐采集
+   - GPT 套餐采集
+   - PIL 渲染
+   - 位图双平面转换
+   - BLE 下发图像
+3. 当前固件端已经具备：
+   - BLE 命令分发入口
+   - `DIRECT_WRITE_START / DATA / END`
+   - 双平面图像写入
+   - Boot Screen 文本与像素绘制基础
+4. 当前协议中 `0x0070-0x0076` 已被图像直写、局部写和设备控制占用。
 
-### 3.2 方案理由
+### 3.2 当前性能结论
 
-1. 当前固件已经具备图像接收与墨水屏刷新能力，可最大化复用现有仓库能力。
-2. 400x300 三色墨水屏的复杂表格、中文文本、细分隔线和双色进度条，在主机侧渲染更稳定。
-3. ESP32 经典款内存有限，若在设备端做完整中文排版与表格布局，复杂度显著更高。
-4. 主机侧更方便直接访问 `aiusage` 本地数据库与后续套餐接口。
+当前慢点已经明确在传输链路，不在主机采集：
 
-### 3.3 明确不采用的方案
+- 双平面整图约 `30KB`
+- BLE 逐 chunk ACK
+- 三色屏整屏刷新固定 `12-15s`
 
-不采用“仅推送结构化数据，由 ESP32 本地排版整页”的方案。
+因此本次详细设计的核心不是改采集逻辑，而是减少蓝牙传输字节数，并把模板渲染移动到设备侧。
 
-原因：
+## 4. 方案选型
 
-- 需要在固件内新增完整布局引擎、中文字体管理、进度条绘制与多表格对齐逻辑；
-- 对经典 ESP32 的内存和开发复杂度不友好；
-- 与当前仓库“已能下发图像”的现状相比，改动面更大。
+### 4.1 选定方案
 
-## 4. 总体架构
+系统同时支持两种显式模式：
 
-## 4.1 组件划分
+1. `bitmap`
+   - 主机渲染 PIL 图像
+   - 转双平面
+   - 通过 `0x0070/0x0071/0x0072` 下发
+2. `firmware_render`
+   - 主机仅采集和组装快照
+   - Host 将快照编码为固定长度二进制 payload
+   - 通过新增命令下发
+   - 设备使用固定模板渲染并刷新
 
-系统拆分为五个组件：
+### 4.2 为什么保留位图模式
 
-1. `Host Scheduler`
-   - 定时触发采集任务。
-2. `Host Data Collector`
-   - 从 `aiusage`、GLM 套餐源、GPT 套餐源采集数据。
-3. `Host Renderer`
-   - 将数据渲染为 `400x300` 三色看板位图。
-4. `BLE Transport`
-   - 将位图发送给设备。
-5. `ESP32 Display Runtime`
-   - 暴露本机状态；
-   - 接收图像并刷新屏幕。
+1. 现有链路已经可用，是最稳定的回归基线。
+2. 新模式第一阶段只作为新增能力，不应破坏现有链路。
+3. 后续验证中如发现固件模板效果不满足要求，只需要切换配置，不需要回滚代码结构。
 
-## 4.2 数据流
+### 4.3 为什么新增固件端渲染
+
+1. 当前页面是固定模板，不需要通用布局引擎。
+2. 传输 30KB 位图远大于传输业务数据本身。
+3. 动态内容几乎都是数字、ASCII 模型名和时间，适合设备侧固定模板绘制。
+4. 当前固件已经具备基础文本像素绘制能力，不需要从零做图形管线。
+
+## 5. 总体架构
+
+## 5.1 Host 侧组件
+
+1. `Scheduler`
+   - 每 `300s` 触发一次刷新
+2. `Collectors`
+   - `aiusage`
+   - `glm_plan`
+   - `gpt_plan`
+3. `Snapshot Builder`
+   - 统一组装 `DashboardSnapshot`
+4. `Transport Encoder`
+   - `bitmap encoder`
+   - `firmware_render encoder`
+5. `BLE Transport`
+   - 按模式发送不同命令
+
+## 5.2 Device 侧组件
+
+1. `BLE Command Dispatcher`
+2. `Direct Write Runtime`
+   - 现有位图模式继续复用
+3. `Dashboard Protocol Runtime`
+   - 新增结构化快照接收状态机
+4. `Dashboard Snapshot Parser`
+5. `Dashboard Renderer`
+   - 固定模板绘制
+6. `Display Refresh Runtime`
+   - 统一调用底层刷新
+
+## 5.3 数据流
+
+### 位图模式
 
 ```text
-定时器(5分钟)
-  -> 读取 aiusage 今日数据
-  -> 读取 GLM 套餐数据
-  -> 读取 GPT 套餐数据
-  -> 读取设备状态(电量、Wi-Fi)
-  -> 组装 DashboardSnapshot
-  -> 渲染 400x300 三色位图
-  -> BLE 下发位图
-  -> ESP32 刷新墨水屏
+Scheduler
+  -> Collectors
+  -> DashboardSnapshot
+  -> PIL Renderer
+  -> RGB to bitplanes
+  -> DIRECT_WRITE_START/DATA/END
+  -> Device full refresh
 ```
 
-## 5. 模块设计
+### 固件渲染模式
 
-## 5.1 Host Scheduler
+```text
+Scheduler
+  -> Collectors
+  -> DashboardSnapshot
+  -> Binary Snapshot Encoder
+  -> DASHBOARD_RENDER_START/DATA/COMMIT
+  -> Device parse snapshot
+  -> Device fixed-template render
+  -> Device full refresh
+```
+
+## 6. Host 侧设计
+
+## 6.1 模式配置
+
+Host 侧新增一个显式配置项：
+
+```text
+TOKEN_DASHBOARD_RENDER_MODE=bitmap|firmware_render
+```
+
+规则：
+
+1. `bitmap`
+   - 走现有链路
+2. `firmware_render`
+   - 走新增结构化链路
+3. 未配置时默认 `bitmap`
+4. 不做自动探测，不做自动切换
+
+## 6.2 Scheduler
 
 ### 职责
 
-- 每 `300` 秒触发一次看板刷新任务；
-- 串行执行，不并发叠加；
-- 仅在上一轮任务结束后开启下一轮。
+- 程序启动立即执行一次
+- 后续每 `300` 秒执行一次
+- 串行执行，不允许重叠
 
-### 触发规则
+### 执行顺序
 
-- 程序启动后立即执行一次；
-- 之后固定每 `5 分钟` 执行一次。
+1. 采集业务数据
+2. 组装 `DashboardSnapshot`
+3. 根据模式选择发送路径
+4. 发送成功后记录本轮成功时间
 
 ### 失败规则
 
-- 任意关键数据源失败，则本轮视为失败；
-- 本轮失败时不推送新图；
-- 墨水屏保留上一次成功画面；
-- 错误只记录主机日志，不在屏幕追加额外状态文字。
+- 任意关键数据源失败，本轮不推送新画面
+- BLE 发送失败，本轮终止
+- 设备保留上一次成功画面
 
-## 5.2 Host Data Collector
+## 6.3 统一快照模型
 
-### 5.2.1 输出模型
-
-主机侧统一产出 `DashboardSnapshot`：
+Host 侧统一产出 `DashboardSnapshot`，两种模式共用：
 
 ```json
 {
   "generatedAt": "2026-05-25T09:24:00+08:00",
   "lastRefreshLabel": "09:24",
-  "device": {
-    "wifiConnected": true,
-    "batteryPercent": 87
-  },
   "today": {
     "totalTokens": 71500000,
     "inputTokens": 24800000,
@@ -136,586 +204,652 @@
   },
   "plans": {
     "glm": {
-      "title": "GLM CodingPlan 套餐",
+      "planLevel": "PRO",
       "fiveHourPercent": 82,
       "fiveHourLabel": "22:17",
       "weekPercent": 64,
-      "weekLabel": "5月31日"
+      "weekLabel": "05-31"
     },
     "gpt": {
-      "title": "GPT Plus 套餐",
       "fiveHourPercent": 43,
-      "fiveHourLabel": "22:17",
+      "fiveHourLabel": "14:07",
       "weekPercent": 57,
-      "weekLabel": "5月31日"
+      "weekLabel": "05-31"
     }
   },
   "models": [
     {
-      "model": "glm-4.7",
-      "provider": "zhipu",
-      "calls": 454,
-      "tokens": 32000000,
-      "sharePercent": 45.2
+      "model": "claude-4-sonnet",
+      "provider": "anthropic",
+      "calls": 48,
+      "tokens": 620000,
+      "sharePercent": 49.8
     }
   ]
 }
 ```
 
-### 5.2.2 aiusage 采集器
+说明：
 
-#### 数据源
+1. 位图模式仍然可以继续附带设备状态后再渲染。
+2. 固件渲染模式下，设备状态由设备本地读取，不再进入 Host payload。
 
-- SQLite：`C:\Users\zhaolu\.aiusage\cache.db`
+## 6.4 采集器设计
 
-#### 统计口径
+### 6.4.1 aiusage 采集器
 
-- 按主机本地时区的自然日统计；
-- 数据表：`records`；
-- 单条总量：
-  - `input_tokens + output_tokens + cache_read_tokens + cache_write_tokens + thinking_tokens`
+继续复用当前逻辑：
 
-#### 今日概览 SQL
+- 数据源：`C:\Users\zhaolu\.aiusage\cache.db`
+- 口径：本地自然日
+- 输出：
+  - `totalTokens`
+  - `inputTokens`
+  - `outputTokens`
+  - `cacheTokens`
+  - `topModels`
 
-```sql
-SELECT
-  SUM(input_tokens) AS input_tokens,
-  SUM(output_tokens) AS output_tokens,
-  SUM(cache_read_tokens) AS cache_read_tokens,
-  SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens + thinking_tokens) AS total_tokens
-FROM records
-WHERE date(ts / 1000, 'unixepoch', 'localtime') = date('now', 'localtime');
-```
+### 6.4.2 GLM 套餐采集器
 
-#### 模型表格 SQL
+继续复用当前接口采集逻辑，输出：
 
-```sql
-SELECT
-  model,
-  provider,
-  COUNT(*) AS calls,
-  SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens + thinking_tokens) AS total_tokens
-FROM records
-WHERE date(ts / 1000, 'unixepoch', 'localtime') = date('now', 'localtime')
-GROUP BY model, provider
-ORDER BY total_tokens DESC
-LIMIT 5;
-```
+- `planLevel`
+- `fiveHourPercent`
+- `fiveHourLabel`
+- `weekPercent`
+- `weekLabel`
 
-#### 占比计算
+### 6.4.3 GPT 套餐采集器
 
-- `share_percent = model_total_tokens / today_total_tokens * 100`
-
-#### 格式化规则
-
-- `>= 1,000,000`：显示 `M`，保留 `1` 位小数；
-- `>= 1,000` 且 `< 1,000,000`：显示 `K`，保留 `1` 位小数；
-- `< 1,000`：显示整数。
-
-### 5.2.3 GLM 套餐采集器
-
-#### 设计目标
-
-输出：
+继续复用当前 Codex 本地会话日志解析逻辑，输出：
 
 - `fiveHourPercent`
 - `fiveHourLabel`
 - `weekPercent`
 - `weekLabel`
 
-#### 数据源
+## 6.5 模式内发送逻辑
 
-- 接口：`GET https://open.bigmodel.cn/api/monitor/usage/quota/limit`
-- Header：`Authorization: Bearer <GLM_API_KEY>`
+### 6.5.1 bitmap 模式
 
-#### 真实返回验证
+沿用当前实现：
 
-已验证接口可返回 `code=200`，样例字段包括：
+1. 渲染整页图像
+2. 转黑/红双平面
+3. 发送 `0x0070`
+4. 分块发送 `0x0071`
+5. 发送 `0x0072`
+6. 等待刷新完成响应
 
-- `data.level`
-- `data.limits[].type`
-- `data.limits[].unit`
-- `data.limits[].number`
-- `data.limits[].percentage`
-- `data.limits[].nextResetTime`
-- `data.limits[].usage`
-- `data.limits[].currentValue`
-- `data.limits[].remaining`
+### 6.5.2 firmware_render 模式
 
-#### 当前观察到的真实样例特征
+执行顺序固定为：
 
-- 存在多个 `limits[]` 项；
-- 当前真实返回中同时出现 `TOKENS_LIMIT` 与 `TIME_LIMIT`；
-- 观察到的重置时间示例包括：
-  - `2026-05-27 10:01:44`
-  - `2026-06-13 10:01:44`
+1. 构建 `DashboardSnapshot`
+2. 编码为 `DashboardSnapshotV1`
+3. 计算 `CRC32`
+4. 发送 `0x0078`
+5. 分块发送 `0x0079`
+6. 发送 `0x007A`
+7. 等待刷新完成响应
 
-#### 映射规则
+## 6.6 无变化跳过
 
-当前映射规则固定如下：
+### bitmap 模式
 
-1. `type = TOKENS_LIMIT` 且 `unit = 3`
-   - 含义：`5 小时使用额度`
-   - 映射到：
-     - `fiveHourPercent`
-     - `fiveHourLabel`
-2. `type = TOKENS_LIMIT` 且 `unit = 6`
-   - 含义：`每周使用额度`
-   - 映射到：
-     - `weekPercent`
-     - `weekLabel`
-3. `type = TIME_LIMIT` 且 `unit = 5`
-   - 含义：`MCP 每月额度`
-   - 本期不进入墨水屏看板展示
+建议比较业务快照摘要，不直接比较整张图。
 
-#### 当前真实样例解释
+### firmware_render 模式
 
-1. `TOKENS_LIMIT + unit=3 + number=5 + percentage=0`
-   - 对应 `5 小时使用额度`
-2. `TOKENS_LIMIT + unit=6 + number=1 + percentage=15 + nextResetTime=2026-05-27 10:01:44`
-   - 对应 `每周使用额度`
-3. `TIME_LIMIT + unit=5 + number=1 + percentage=2 + nextResetTime=2026-06-13 10:01:44`
-   - 对应 `MCP 每月额度`
-   - 当前看板忽略
+直接比较 `DashboardSnapshotV1` 二进制内容：
 
-#### 接口约束
+- 完全一致则跳过本轮发送
+- 不一致才发 BLE
 
-GLM 采集器后续必须向上层返回统一结构：
+注意：
 
-```json
-{
-  "fiveHourPercent": 82,
-  "fiveHourLabel": "22:17",
-  "weekPercent": 64,
-  "weekLabel": "5月31日"
-}
-```
+- `lastRefreshLabel` 只能在发送成功后更新
+- 否则会导致每轮 payload 都不同
 
-#### 建议实现方式
+## 7. BLE 协议设计
 
-1. 主机侧使用 HTTPS 每 5 分钟请求一次；
-2. 从 `data.limits[]` 中按以下规则筛选：
-   - `TOKENS_LIMIT + unit=3` -> `5 小时`
-   - `TOKENS_LIMIT + unit=6` -> `一周`
-3. 读取 `percentage` 与 `nextResetTime`；
-4. 将 `nextResetTime` 转换为：
-   - 当日时间格式：`HH:mm`
-   - 跨日重置格式：`M月D日`
-5. 若 `5 小时` 项缺少 `nextResetTime`，则按固定窗口展示百分比，并由实现阶段为时间位输出固定占位文本。
+## 7.1 现有命令保留
 
-### 5.2.4 GPT 套餐采集器
+下面这些命令不做任何改动：
 
-#### 设计目标
+| 命令 | 作用 |
+|------|------|
+| `0x0044` | `READ_MSD` |
+| `0x0070` | `DIRECT_WRITE_START` |
+| `0x0071` | `DIRECT_WRITE_DATA` |
+| `0x0072` | `DIRECT_WRITE_END` |
+| `0x0076` | `PARTIAL_WRITE_START` |
 
-输出：
+## 7.2 新增命令
 
-- `fiveHourPercent`
-- `fiveHourLabel`
-- `weekPercent`
-- `weekLabel`
+建议新增独立命令组：
 
-#### 数据源
+| 命令 | 名称 | 作用 |
+|------|------|------|
+| `0x0078` | `DASHBOARD_RENDER_START` | 开始接收结构化看板快照 |
+| `0x0079` | `DASHBOARD_RENDER_DATA` | 继续接收快照数据 |
+| `0x007A` | `DASHBOARD_RENDER_COMMIT` | 校验、渲染并触发刷新 |
 
-- 本机 Codex 会话日志目录：
-  - `C:\Users\zhaolu\.codex\sessions\`
+## 7.3 响应定义
 
-#### 真实可读字段
+| 响应 | 含义 |
+|------|------|
+| `[0x00, 0x78]` | START ACK |
+| `[0x00, 0x79]` | DATA ACK |
+| `[0x00, 0x7A]` | COMMIT ACK |
+| `[0x00, 0x7B]` | 刷新成功 |
+| `[0x00, 0x7C]` | 刷新超时 |
+| `[0xFF, opcode, errorCode, 0x00]` | 协议错误 |
 
-当前最新会话文件中已存在如下真实记录：
+## 7.4 错误码
 
-```json
-{
-  "rate_limits": {
-    "primary": {
-      "used_percent": 19.0,
-      "window_minutes": 300,
-      "resets_at": 1779689258
-    },
-    "secondary": {
-      "used_percent": 20.0,
-      "window_minutes": 10080,
-      "resets_at": 1780219073
-    },
-    "plan_type": "plus"
-  }
-}
-```
+| errorCode | 含义 |
+|-----------|------|
+| `0x01` | 版本不支持 |
+| `0x02` | payload 长度非法 |
+| `0x03` | payload 超过缓冲区上限 |
+| `0x04` | CRC 校验失败 |
+| `0x05` | 状态机错误 |
+| `0x06` | 字段值非法 |
+| `0x07` | 当前正在渲染，设备 busy |
+| `0x08` | 刷新模式不支持 |
 
-对应本地时间：
+## 7.5 START 帧
 
-- `primary.resets_at = 2026-05-25 14:07:38`
-- `secondary.resets_at = 2026-05-31 17:17:53`
-
-#### 设计结论
-
-GPT Plus 套餐采集器直接读取本机最新 Codex 会话中的 `rate_limits` 即可：
-
-- `primary` -> `5 小时`
-- `secondary` -> `一周`
-
-这样可以稳定获得：
-
-- 使用百分比；
-- 重置时间；
-- 订阅类型。
-
-#### 建议实现方式
-
-1. 主机侧扫描 `C:\Users\zhaolu\.codex\sessions\` 下最新的 `rollout-*.jsonl`；
-2. 逆序读取最近一条包含 `rate_limits` 的 `token_count` 事件；
-3. 提取：
-   - `primary.used_percent`
-   - `primary.resets_at`
-   - `secondary.used_percent`
-   - `secondary.resets_at`
-4. 将 `resets_at` 的 Unix 秒时间戳转换为本地时间文本。
-
-## 5.3 Device Runtime Status 采集
-
-### 5.3.1 设计目标
-
-顶部右侧的 `Wi-Fi 已连接` 与 `87%` 不从主机硬编码，而是来自设备当前状态。
-
-### 5.3.2 数据项
-
-- `wifiConnected`
-- `batteryPercent`
-
-### 5.3.3 获取方式
-
-主机在每次渲染前，先通过 BLE 向设备读取运行态信息，再将结果绘制到位图中。
-
-### 5.3.4 固件侧新增需求
-
-在现有 BLE 命令协议上新增一个轻量运行态读取命令：
-
-- 命令名：`READ_RUNTIME_STATUS`
-- 作用：返回设备当前 Wi-Fi 连接状态和电量百分比
-
-建议响应结构：
+请求格式：
 
 ```text
-[status=0x00] [cmd_low] [wifi_connected:1byte] [battery_percent:1byte]
+[0x00, 0x78]
+[version:1]
+[flags:1]
+[payload_len_le:2]
+[crc32_le:4]
+[optional_initial_payload...]
+```
+
+字段说明：
+
+- `version`
+  - 固定 `1`
+- `flags`
+  - bit0: 请求 `FULL` 刷新
+  - bit1: 请求 `FAST` 刷新
+  - bit2-bit7: 保留
+- `payload_len_le`
+  - `DashboardSnapshotV1` 总长度
+- `crc32_le`
+  - Host 对完整 payload 计算的 CRC32
+
+规则：
+
+1. START 到达时清理上一次 dashboard render 状态。
+2. 如果可选初始 payload 已经带了一部分数据，也要计入接收长度。
+
+## 7.6 DATA 帧
+
+请求格式：
+
+```text
+[0x00, 0x79]
+[payload_chunk...]
+```
+
+规则：
+
+1. 每个 chunk 收到后立即 ACK
+2. 累积长度不能超过 START 声明的 `payload_len`
+3. 累积长度不能超过固件缓冲区上限
+
+## 7.7 COMMIT 帧
+
+请求格式：
+
+```text
+[0x00, 0x7A]
+[refresh_mode:1]
 ```
 
 字段定义：
 
-- `wifi_connected`
-  - `0x00`：未连接
-  - `0x01`：已连接
-- `battery_percent`
-  - `0-100`
+- `0`
+  - `FULL`
+- `1`
+  - `FAST`
 
-### 5.3.5 文案规则
+规则：
 
-- `wifi_connected = 1` 时显示 `Wi-Fi 已连接`
-- 本期需求未定义断网状态替代文案，因此断网状态在进入实现前需再确认是否允许显示 `Wi-Fi 未连接`
+1. COMMIT 前必须先收满 `payload_len`
+2. 先做 CRC32 校验
+3. 再做字段合法性校验
+4. 校验通过后再进入绘制和刷新
 
-## 5.4 Host Renderer
+## 8. DashboardSnapshotV1 设计
 
-### 5.4.1 渲染策略
+## 8.1 编码约束
 
-主机侧生成整页 `400x300` 位图，并按三色电子纸要求输出：
+- 字节序：`little-endian`
+- 动态字符串编码：`ASCII`
+- 动态模型条数：最大 `4`
+- 固定中文标签：设备内置，不由 Host 发送
 
-- 白底；
-- 黑色图层；
-- 红色告警图层。
+## 8.2 总体布局
 
-### 5.4.2 字体策略
+固定长度 `192B`：
 
-建议使用清晰、偏粗的无衬线中文字体，统一在主机渲染。
+```text
+offset  size  field
+0       1     schema_version
+1       1     row_count
+2       1     glm_5h_percent
+3       1     glm_week_percent
+4       1     gpt_5h_percent
+5       1     gpt_week_percent
+6       1     glm_level_len
+7       1     reserved
+8       4     total_tokens_u32
+12      4     input_tokens_u32
+16      4     output_tokens_u32
+20      4     cache_tokens_u32
+24      5     last_refresh_ascii
+29      5     glm_5h_label_ascii
+34      5     glm_week_label_ascii
+39      5     gpt_5h_label_ascii
+44      5     gpt_week_label_ascii
+49      8     glm_level_ascii
+57      132   model_rows[4]
+189     3     reserved
+```
 
-推荐字号层级：
+## 8.3 字段解释
 
-- 主标题：`22px`
-- 顶栏状态：`11px`
-- 今日总量值：`36px`
-- 今日总量单位：`10px`
-- 概览副值：`28px`
-- 套餐标题：`16px`
-- 套餐行标签：`12px`
-- 套餐百分比：`18px`
-- 表头：`12px`
-- 表体：`11px`
-- 底部刷新时间：`11px`
+### 百分比字段
 
-### 5.4.3 画布坐标
+- 范围：`0-100`
+- 非法值：`>100`
 
-采用固定像素布局。
+### Token 数量字段
 
-#### 总画布
+- 类型：`uint32`
+- 单位：原始 token 数量
+
+### 时间标签字段
+
+格式约束：
+
+- `5 小时`：`HH:mm`
+- `一周`：`MM-DD`
+- `last_refresh`：`HH:mm`
+
+长度固定 `5` 字节，不足补 `0`。
+
+### GLM 套餐等级
+
+- 最长 `8` 字节
+- 只允许 ASCII
+- 示例：
+  - `FREE`
+  - `PLUS`
+  - `PRO`
+
+## 8.4 模型行结构
+
+每行固定 `33B`：
+
+```text
+offset  size  field
+0       24    model_ascii
+24      1     provider_code
+25      2     calls_u16
+27      4     total_tokens_u32
+31      2     share_bp_u16
+```
+
+## 8.5 provider_code 映射
+
+| 值 | provider |
+|----|----------|
+| `1` | `zhipu` |
+| `2` | `openai` |
+| `3` | `anthropic` |
+| `4` | `google` |
+| `255` | `other` |
+
+## 8.6 share_bp_u16
+
+- 单位：百分比基点
+- `100.00% = 10000`
+- `49.8% = 4980`
+
+## 8.7 Host 侧模型名规则
+
+Host 在编码前必须保证：
+
+1. 模型名仅保留 ASCII
+2. 超过 `24` 字节时裁剪
+3. 非 ASCII 字符替换为约定别名或 `_`
+
+## 9. Device 侧设计
+
+## 9.1 模块划分
+
+建议新增下面 3 个文件：
+
+```text
+src/dashboard_protocol.h
+src/dashboard_protocol.cpp
+src/dashboard_renderer.h
+src/dashboard_renderer.cpp
+```
+
+职责：
+
+1. `dashboard_protocol`
+   - BLE 结构化快照状态机
+   - 缓冲区管理
+   - CRC 校验
+   - 字段解析
+2. `dashboard_renderer`
+   - 固定模板绘制
+   - 颜色判定
+   - 字段格式输出
+
+## 9.2 协议状态机
+
+状态建议如下：
+
+1. `IDLE`
+2. `RECEIVING`
+3. `READY_TO_COMMIT`
+4. `RENDERING`
+
+状态迁移：
+
+```text
+IDLE --START--> RECEIVING
+RECEIVING --all bytes received--> READY_TO_COMMIT
+READY_TO_COMMIT --COMMIT--> RENDERING
+RENDERING --success/fail--> IDLE
+```
+
+约束：
+
+1. `RECEIVING` 状态再次收到 START，直接重置并按新请求开始。
+2. `RENDERING` 状态收到任意 dashboard render 命令，返回 `busy`。
+
+## 9.3 缓冲区设计
+
+建议设备端单独维护一块 dashboard payload 缓冲区：
+
+- 大小固定 `256B`
+- 仅供 `DashboardSnapshotV1` 使用
+
+原因：
+
+- 当前 payload 固定 `192B`
+- 留出协议头和后续小幅扩展空间
+- 不和图像压缩缓冲复用，避免状态混乱
+
+## 9.4 本地状态读取
+
+固件渲染模式中，设备本地读取：
+
+- `wifiConnected`
+- `batteryPercent`
+
+规则：
+
+1. `wifiConnected`
+   - 已连接 AP 且已获取 IP 时为真
+2. `batteryPercent`
+   - 继续复用现有电压转百分比规则
+
+这样 Host 不再需要在固件渲染模式下额外发起 `READ_MSD`。
+
+## 9.5 固定模板渲染
+
+设备侧不做通用布局，只做固定模板。
+
+### 模板区域
+
+1. 顶部概览框
+2. 左套餐卡片
+3. 右套餐卡片
+4. 模型表格
+5. 底部刷新时间
+6. 右上角设备状态
+
+### 固定标签
+
+下面这些中文标签内置到设备端，不从 Host 传：
+
+- `今日总量TOKEN`
+- `输入`
+- `输出`
+- `缓存`
+- `5小时`
+- `一周`
+- `上次刷新`
+- `GLM CodingPlan`
+- `GPT Plus`
+- `占比`
+- `调用`
+
+### 动态字段
+
+设备端仅绘制下面这些动态内容：
+
+- 数字型 token 数值
+- 百分比
+- 时间标签
+- GLM 套餐等级
+- ASCII 模型名
+- provider 缩写
+
+## 9.6 绘图原语
+
+建议第一版只实现下面这些原语：
+
+1. 画实线矩形边框
+2. 画实线分隔线
+3. 画简单虚线
+4. 画纯色填充条
+5. 画 ASCII 文本
+6. 画固定中文标签位图
+
+第一版不追求：
+
+- 圆角完全一致
+- 所有虚线节奏与 PIL 完全一致
+- 字号像素级复刻
+
+## 9.7 颜色规则
+
+保持与现有位图模式一致：
+
+### 黑色
+
+- 正文
+- 边框
+- 分隔线
+- 普通进度条
+- 表格占比条
+
+### 红色
+
+仅当套餐百分比 `>= 80` 时，对应：
+
+- 进度条填充
+- 百分比文本
+
+## 9.8 刷新规则
+
+### 第一版要求
+
+1. 默认只允许 `FULL`
+2. 协议中可以预留 `FAST`
+3. 若收到 `FAST` 且当前设备不允许，返回 `0x08`
+
+原因：
+
+- 当前目标先保证三色屏观感稳定
+- 不把第一版复杂度扩展到刷新策略试验
+
+## 10. 页面布局规则
+
+设备端布局目标与当前页面保持一致，但允许实现细节有小幅偏差。
+
+### 10.1 画布
 
 - 宽：`400`
 - 高：`300`
 - 背景：白色
 
-#### 区域坐标
+### 10.2 概览区
 
-| 区域 | X | Y | W | H |
-|---|---:|---:|---:|---:|
-| 顶部标题栏 | 8 | 6 | 384 | 24 |
-| 标题栏下分隔线 | 8 | 30 | 384 | 1 |
-| 今日概览区 | 8 | 36 | 384 | 60 |
-| 套餐区左卡片 | 8 | 102 | 188 | 70 |
-| 套餐区右卡片 | 204 | 102 | 188 | 70 |
-| 模型表格区 | 8 | 178 | 384 | 96 |
-| 底部分隔线 | 8 | 280 | 384 | 1 |
-| 底部刷新时间区 | 8 | 286 | 160 | 10 |
+- 4 列固定布局
+- 显示：
+  - 今日总量
+  - 输入
+  - 输出
+  - 缓存
 
-### 5.4.4 顶栏布局
+### 10.3 套餐区
 
-- 左侧标题起点：`(12, 11)`
-- 右侧状态区从右向左排布：
-  - 电量百分比
-  - 电量图标
-  - `Wi-Fi 已连接`
+- 左：GLM
+- 右：GPT
+- 每卡片 2 行：
+  - `5小时`
+  - `一周`
 
-不显示时间。
+### 10.4 表格区
 
-### 5.4.5 今日概览区布局
+- 最多 `4` 行模型
+- 列内容：
+  - 模型
+  - 调用
+  - TOKEN
+  - 占比
 
-四等分，每列宽度 `96px`。
+### 10.5 底部
 
-- 第 1 列：今日总量
-- 第 2 列：输入
-- 第 3 列：输出
-- 第 4 列：缓存
+- `上次刷新：HH:mm`
 
-列间使用竖向虚线。
+## 11. Host 与 Device 的职责边界
 
-### 5.4.6 套餐卡片布局
+## 11.1 Host 负责
 
-每张卡片包含：
+1. 业务数据采集
+2. 业务数据聚合
+3. 时间标签生成
+4. 模型名 ASCII 化
+5. 二进制 payload 编码
+6. CRC32 计算
+7. BLE 分块发送
 
-- 标题行；
-- 两条用量行；
-- 中间一条虚线分隔。
+## 11.2 Device 负责
 
-每条用量行固定对齐：
+1. payload 接收
+2. CRC 校验
+3. 固定模板渲染
+4. 本地设备状态读取
+5. 最终整屏刷新
 
-| 元素 | 左侧偏移 |
-|---|---:|
-| 时间范围标题 | 10 |
-| 进度条起点 | 58 |
-| 百分比起点 | 138 |
-| 时间标签起点 | 168 |
+## 12. 异常处理规则
 
-进度条尺寸：
+## 12.1 Host 侧
 
-- 宽：`68px`
-- 高：`10px`
-- 边框：黑色 `1px`
-- 填充：黑色或红色
+### 数据源失败
 
-### 5.4.7 表格布局
+- 不发新 payload
+- 保留旧画面
 
-表格宽度 `384px`，列宽固定：
+### payload 编码失败
 
-| 列 | 宽度 |
-|---|---:|
-| 模型 | 108 |
-| 提供商 | 60 |
-| 调用 | 44 |
-| TOKEN | 68 |
-| 占比 | 104 |
+- 直接终止本轮
 
-占比列内部结构：
+### BLE 发送失败
 
-- 进度条宽：`56px`
-- 百分比文本宽：`40px`
-- 进度条始终黑色，不使用红色。
+- 终止本轮
+- 不做二次自动改走位图模式
 
-### 5.4.8 底部区域布局
+## 12.2 Device 侧
 
-- 左对齐显示：`上次刷新：HH:mm`
-- 不显示其他信息。
+### CRC 失败
 
-## 5.5 颜色与规则实现
+- 返回错误
+- 不刷新
 
-### 5.5.1 黑色内容
+### 字段非法
 
-- 所有正文；
-- 所有边框；
-- 所有分隔线；
-- 普通套餐进度条；
-- 模型占比进度条。
+- 返回错误
+- 不刷新
 
-### 5.5.2 红色内容
+### 渲染失败
 
-只允许出现于套餐区满足 `percent >= 80` 的以下元素：
+- 返回刷新失败
+- 保留旧画面
 
-- 当前项进度条填充；
-- 当前项百分比文本。
+## 13. 测试设计
 
-### 5.5.3 禁止项
+## 13.1 Host 单元验证
 
-渲染器不得输出：
+1. `DashboardSnapshot` 组装
+2. `DashboardSnapshotV1` 编码长度固定 `192B`
+3. CRC32 结果稳定
+4. 模型名 ASCII 化规则
+5. 无变化跳过逻辑
 
-- 灰度；
-- 渐变；
-- 阴影；
-- 彩色背景；
-- 额外装饰图标。
+## 13.2 协议联调验证
 
-## 6. BLE 传输设计
-
-### 6.1 传输方案
-
-复用现有 BLE 图像写入链路：
-
-1. `DIRECT_WRITE_START`
-2. `DIRECT_WRITE_DATA`
-3. `DIRECT_WRITE_END`
-
-### 6.2 传输步骤
-
-```text
-1. 主机连接设备 BLE 服务
-2. 读取 READ_RUNTIME_STATUS
-3. 主机构造 DashboardSnapshot
-4. 主机渲染完整位图
-5. 主机发送 DIRECT_WRITE_START
-6. 主机分块发送 DIRECT_WRITE_DATA
-7. 主机发送 DIRECT_WRITE_END
-8. 设备执行一次整屏刷新
-```
-
-### 6.3 分块要求
-
-- 单块大小遵循当前固件已支持的 BLE 写入上限；
-- 必须等待设备可接收后继续发送下一块；
-- 任一块发送失败，则本轮终止。
-
-## 7. 固件侧改动设计
-
-### 7.1 改动范围
-
-固件侧只做两类改动：
-
-1. 新增 `READ_RUNTIME_STATUS` 命令；
-2. 保持现有图像写入链路可稳定接收整页看板图像。
-
-### 7.2 不做的改动
-
-- 不在 ESP32 上实现整页看板排版；
-- 不在设备端解析 `aiusage` 数据；
-- 不在设备端实现套餐计算逻辑。
-
-### 7.3 电量百分比来源
-
-建议复用现有电池电压读取能力，按统一阈值换算百分比：
-
-- `>= 4.20V` -> `100%`
-- `<= 3.30V` -> `0%`
-- 中间线性插值。
-
-### 7.4 Wi-Fi 状态来源
-
-复用现有 Wi-Fi 运行态：
-
-- 已连接 AP 且已获取 IP：`wifiConnected = true`
-- 否则：`false`
-
-## 8. 主机侧实现建议
-
-## 8.1 技术选型
-
-主机侧建议单独实现为一个轻量 Python 程序。
-
-原因：
-
-- 可直接使用标准库 `sqlite3` 读取 `aiusage`；
-- 可使用 `Pillow` 渲染位图；
-- 可使用 `bleak` 在 Windows 上完成 BLE 通信；
-- 不依赖固件仓库现有 C++ 工程链。
-
-### 8.2 建议目录
-
-后续实现建议新增：
-
-```text
-tools/
-  token_dashboard_host/
-    main.py
-    collectors/
-    renderer/
-    ble/
-```
-
-## 9. 数据格式化规则
-
-### 9.1 Token 数值格式
-
-- `71,500,000 -> 71.5M`
-- `55,400 -> 55.4K`
-- `999 -> 999`
-
-### 9.2 百分比格式
-
-- 向界面输出整数或一位小数；
-- 推荐套餐百分比显示整数；
-- 模型占比显示一位小数。
-
-### 9.3 时间格式
-
-- 5 小时重置：`HH:mm`
-- 一周重置：`M月D日`
-- 底部刷新时间：`HH:mm`
-
-## 10. 异常处理规则
-
-### 10.1 aiusage 无数据
-
-- 今日数据为 `0`；
-- 模型表格为空；
-- 本轮仍可渲染。
-
-### 10.2 套餐数据缺失
-
-- 由于需求明确要求 GLM 与 GPT 都必须展示两项；
-- 因此套餐数据缺失时，本轮不生成新看板，不推送屏幕。
-
-### 10.3 BLE 下发失败
-
-- 立即终止当前轮次；
-- 不生成半屏画面；
-- 保留上一次成功画面。
-
-## 11. 测试设计
-
-### 11.1 数据层验证
-
-- 验证 `aiusage` 今日聚合 SQL 输出；
-- 验证模型 Top5 排序；
-- 验证 Token 格式化规则。
-
-### 11.2 渲染层验证
-
-- 验证 `400x300` 画布尺寸；
-- 验证黑白红三色限制；
-- 验证 `>= 80%` 红色告警规则；
-- 验证套餐两行严格对齐；
-- 验证表格列宽与行分隔。
-
-### 11.3 传输层验证
-
-- 验证 BLE 连接；
-- 验证运行态读取；
-- 验证整页位图分块发送；
-- 验证设备端完整刷新。
-
-## 12. 实现前阻塞项
-
-当前设计可以直接指导以下部分进入实现：
-
-- 看板像素布局；
-- `aiusage` 今日数据采集；
-- GLM 在线套餐采集；
-- GPT 本地 Codex 会话套餐采集；
-- 主机渲染器；
-- BLE 整页推图；
-- ESP32 运行态读取命令。
-
-当前剩余的主要不确定项只有一项：
-
-1. 设备 Wi-Fi 断开时的顶部文案是否允许显示 `Wi-Fi 未连接`。
+1. `0x0078` START ACK
+2. `0x0079` DATA ACK
+3. `0x007A` COMMIT ACK
+4. `0x007B` 刷新成功
+5. 错误码覆盖：
+   - 非法版本
+   - CRC 错误
+   - 长度错误
+   - busy
+
+## 13.3 固件渲染验证
+
+1. 总量四列显示正确
+2. 套餐百分比与标签显示正确
+3. `>= 80%` 红色告警正确
+4. 表格最多 `4` 行展示正确
+5. 设备状态显示正确
+
+## 13.4 回归验证
+
+1. 位图模式仍可正常推图
+2. 固件渲染模式可正常刷新
+3. 两种模式切换只影响发送路径，不影响采集结果
+
+## 14. 验收标准
+
+满足下面条件即可视为设计落地成功：
+
+1. `bitmap` 模式继续可用
+2. `firmware_render` 模式可独立启用
+3. Host 可稳定发送 `DashboardSnapshotV1`
+4. Device 可稳定解析并绘制模板
+5. 结构化模式下，BLE 传输耗时显著低于位图模式
+6. 屏幕显示字段完整、颜色规则正确、无明显错位
+
+## 15. 当前实现建议顺序
+
+建议按这个顺序实现：
+
+1. Host 侧统一 `DashboardSnapshot`
+2. Host 侧新增 `firmware_render encoder`
+3. Host 侧新增模式配置
+4. 固件侧新增 `0x0078/0x0079/0x007A` 协议状态机
+5. 固件侧新增 `DashboardSnapshotV1` 解析
+6. 固件侧新增固定模板绘制
+7. 联调 CRC、ACK、刷新完成响应
+8. 最后做双模式回归验证

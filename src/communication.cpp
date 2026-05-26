@@ -5,6 +5,7 @@
 #include "device_control.h"
 #include "buzzer_control.h"
 #include "display_service.h"
+#include "dashboard_protocol.h"
 
 #include <Arduino.h>
 #include <string.h>
@@ -228,7 +229,7 @@ void handleReadMSD() {
     response[responseLen++] = 0x44;
     memcpy(&response[responseLen], msd_payload, sizeof(msd_payload));
     responseLen += sizeof(msd_payload);
-    response[responseLen++] = wifiConnected ? 1 : 0;
+    response[responseLen++] = wifiServerConnected ? 1 : 0;
     sendResponse(response, responseLen);
     writeSerial("MSD read response sent (" + String(responseLen) + " bytes)", true);
 }
@@ -578,10 +579,64 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
             writeSerial("=== ENTER DFU MODE COMMAND (0x0051) ===");
             enterDFUMode();
             break;
+        case 0x0078:
+            writeSerial("=== DASHBOARD RENDER START COMMAND (0x0078) ===");
+            handleDashboardRenderStart(data + 2, len - 2);
+            break;
+        case 0x0079:
+            writeSerial("=== DASHBOARD RENDER DATA COMMAND (0x0079) ===");
+            handleDashboardRenderData(data + 2, len - 2);
+            break;
+        case 0x007A:
+            writeSerial("=== DASHBOARD RENDER COMMIT COMMAND (0x007A) ===");
+            handleDashboardRenderCommit(data + 2, len - 2);
+            break;
         default:
             writeSerial("ERROR: Unknown command: 0x" + String(command, HEX));
             writeSerial("Expected: 0x0011 (read config), 0x0064 (image info), 0x0065 (block data), or 0x0003 (finalize)");
             break;
     }
     writeSerial("Command processing completed successfully");
+}
+
+// Dashboard render command handlers
+extern "C" DashboardProtocolContext* get_dashboard_context(void);
+
+void handleDashboardRenderStart(uint8_t* data, uint16_t len) {
+    DashboardProtocolContext* ctx = get_dashboard_context();
+    uint8_t response[32];
+    uint16_t resp_len = dashboard_handle_start(ctx, data, len, response);
+    if (resp_len > 0) {
+        sendResponseUnencrypted(response, resp_len);
+    }
+}
+
+void handleDashboardRenderData(uint8_t* data, uint16_t len) {
+    DashboardProtocolContext* ctx = get_dashboard_context();
+    uint8_t response[32];
+    uint16_t resp_len = dashboard_handle_data(ctx, data, len, response);
+    if (resp_len > 0) {
+        sendResponseUnencrypted(response, resp_len);
+    }
+}
+
+void handleDashboardRenderCommit(uint8_t* data, uint16_t len) {
+    DashboardProtocolContext* ctx = get_dashboard_context();
+    uint8_t response[32];
+    uint8_t refresh_mode = (len >= 1) ? data[0] : 0;
+    bool should_render = false;
+    uint16_t resp_len = dashboard_handle_commit(ctx, data, len, response, refresh_mode, &should_render);
+    if (resp_len > 0) {
+        sendResponseUnencrypted(response, resp_len);
+    }
+
+    // If COMMIT ACK was sent, now do the actual rendering
+    if (should_render) {
+        delay(50);  // Allow Host to process COMMIT ACK before blocking for render
+        dashboard_execute_render(ctx);
+
+        // Send refresh result
+        uint8_t success_resp[] = {0x00, 0x7B};
+        sendResponseUnencrypted(success_resp, sizeof(success_resp));
+    }
 }

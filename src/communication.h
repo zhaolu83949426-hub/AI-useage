@@ -14,5 +14,8 @@ void handleReadMSD();
 void handleReadConfig();
 void handleWriteConfig(uint8_t* data, uint16_t len);
 void handleWriteConfigChunk(uint8_t* data, uint16_t len);
+void handleDashboardRenderStart(uint8_t* data, uint16_t len);
+void handleDashboardRenderData(uint8_t* data, uint16_t len);
+void handleDashboardRenderCommit(uint8_t* data, uint16_t len);
 
 #endif

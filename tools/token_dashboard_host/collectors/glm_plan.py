@@ -1,31 +1,28 @@
 """GLM CodingPlan quota collector via Zhipu API."""
 
 import logging
-from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 
 import requests
 
 from ..config import GLM_API_BASE, GLM_API_TOKEN
+from ..renderer.snapshot import GLMPlanStatus
 
 logger = logging.getLogger(__name__)
 _CST = timezone(timedelta(hours=8))
-
-
-@dataclass
-class GLMPlanStatus:
-    five_hour_percent: int = 0
-    five_hour_label: str = "--:--"
-    week_percent: int = 0
-    week_label: str = "--月--日"
-    available: bool = False
 
 
 def collect_glm_plan() -> GLMPlanStatus:
     """Fetch GLM CodingPlan usage from Zhipu API."""
     if not GLM_API_TOKEN:
         logger.warning("GLM_API_TOKEN not configured")
-        return GLMPlanStatus()
+        return GLMPlanStatus(
+            five_hour_percent=0,
+            five_hour_label="--:--",
+            week_percent=0,
+            week_label="--月--日",
+            available=False,
+        )
 
     try:
         resp = requests.get(
@@ -38,9 +35,23 @@ def collect_glm_plan() -> GLMPlanStatus:
 
         if data.get("code") != 200:
             logger.warning(f"GLM API returned code={data.get('code')}")
-            return GLMPlanStatus()
+            return GLMPlanStatus(
+                five_hour_percent=0,
+                five_hour_label="--:--",
+                week_percent=0,
+                week_label="--月--日",
+                available=False,
+            )
 
-        result = GLMPlanStatus(available=True)
+        level = str(data.get("data", {}).get("level", "")).strip()
+        result = GLMPlanStatus(
+            plan_level=level.upper() if level else None,
+            available=True,
+            five_hour_percent=0,
+            five_hour_label="--:--",
+            week_percent=0,
+            week_label="--月--日",
+        )
 
         for limit in data.get("data", {}).get("limits", []):
             limit_type = limit.get("type", "")
@@ -59,7 +70,13 @@ def collect_glm_plan() -> GLMPlanStatus:
 
     except Exception as e:
         logger.error(f"GLM plan collection failed: {e}")
-        return GLMPlanStatus()
+        return GLMPlanStatus(
+            five_hour_percent=0,
+            five_hour_label="--:--",
+            week_percent=0,
+            week_label="--月--日",
+            available=False,
+        )
 
 
 def _format_reset_time(timestamp_ms: int | float | None, is_weekly: bool) -> str:

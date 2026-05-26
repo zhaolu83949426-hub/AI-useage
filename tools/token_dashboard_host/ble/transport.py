@@ -21,6 +21,11 @@ CMD_DIRECT_WRITE_START = bytes([0x00, 0x70])
 CMD_DIRECT_WRITE_DATA = bytes([0x00, 0x71])
 CMD_DIRECT_WRITE_END = bytes([0x00, 0x72])
 
+# Dashboard render commands
+CMD_DASHBOARD_RENDER_START = bytes([0x00, 0x78])
+CMD_DASHBOARD_RENDER_DATA = bytes([0x00, 0x79])
+CMD_DASHBOARD_RENDER_COMMIT = bytes([0x00, 0x7A])
+
 
 class BLETransportError(Exception):
     pass
@@ -93,39 +98,53 @@ class BLETransport:
     async def send_3color_image(self, black_plane: bytes, red_plane: bytes) -> bool:
         """Send a 3-color image to the display.
 
-        Protocol flow (requires firmware dual-plane patch):
-          START -> DATA(15K black) -> END(transition) -> DATA(15K red) -> END(refresh)
-
-        Returns True if refresh succeeded.
+        Protocol: START -> DATA(black plane, last chunk auto-triggers dual-plane END)
+                  -> sleep -> DATA(red plane, all but last as normal DATA)
+                  -> explicit END (triggers display refresh)
         """
         assert len(black_plane) == PLANE_SIZE
         assert len(red_plane) == PLANE_SIZE
 
-        # Phase 1: DIRECT_WRITE_START
+        # DIRECT_WRITE_START
         resp = await self._send_command(CMD_DIRECT_WRITE_START)
         if resp[0] != 0x00:
             raise BLETransportError(f"DIRECT_WRITE_START failed: {resp.hex()}")
 
-        # Phase 2: Send PLANE_0 (black/white) data
-        await self._send_chunks(black_plane)
+        # Send black plane - last chunk auto-triggers dual-plane transition (returns 0x72)
+        for i in range(0, PLANE_SIZE, BLE_CHUNK_SIZE):
+            chunk = black_plane[i:i + BLE_CHUNK_SIZE]
+            resp = await self._send_command(CMD_DIRECT_WRITE_DATA + chunk, timeout=15.0)
+            if resp[0] != 0x00:
+                raise BLETransportError(f"Black DATA failed at {i}")
+            if resp[1] == 0x72:
+                break
+        else:
+            raise BLETransportError("Black plane: no auto-END received")
+        logger.info("Black plane complete, dual-plane transition")
 
-        # Phase 3: First DIRECT_WRITE_END (firmware transitions to PLANE_1)
-        resp = await self._send_command(CMD_DIRECT_WRITE_END + bytes([0x00]))
-        if resp[0] != 0x00:
-            raise BLETransportError(f"First DIRECT_WRITE_END failed: {resp.hex()}")
+        # Wait for PLANE_1 hardware initialization
+        await asyncio.sleep(5)
 
-        # Phase 4: Send PLANE_1 (red) data
-        await self._send_chunks(red_plane)
+        # Send red plane - send all chunks, last may auto-trigger refresh
+        for i in range(0, PLANE_SIZE, BLE_CHUNK_SIZE):
+            chunk = red_plane[i:i + BLE_CHUNK_SIZE]
+            resp = await self._send_command(CMD_DIRECT_WRITE_DATA + chunk, timeout=30.0)
+            if resp[0] != 0x00:
+                raise BLETransportError(f"Red DATA failed at {i}")
+            if resp[1] == 0x72:
+                logger.info("Red plane auto-END")
+                break
+        else:
+            # All chunks sent without auto-END, send explicit END to trigger refresh
+            resp = await self._send_command(CMD_DIRECT_WRITE_END + bytes([0x00]), timeout=30.0)
+            if resp[0] != 0x00:
+                raise BLETransportError(f"Red END failed: {resp.hex()}")
+        logger.info("Red plane complete, refresh triggered")
 
-        # Phase 5: Second DIRECT_WRITE_END (triggers display refresh)
-        resp = await self._send_command(CMD_DIRECT_WRITE_END + bytes([0x00]))
-        if resp[0] != 0x00:
-            raise BLETransportError(f"Second DIRECT_WRITE_END failed: {resp.hex()}")
-
-        # Phase 6: Wait for refresh completion
+        # Wait for refresh completion
         refresh_resp = await self._wait_response(timeout=65.0)
         if refresh_resp and len(refresh_resp) >= 2:
-            if refresh_resp[1] == 0x73:
+            if refresh_resp[1] in (0x72, 0x73):
                 logger.info("Display refresh succeeded")
                 return True
             elif refresh_resp[1] == 0x74:
@@ -133,6 +152,90 @@ class BLETransport:
                 return False
 
         return False
+
+    async def send_dashboard_snapshot(self, payload: bytes, crc32: int, refresh_mode: str = "FULL") -> bool:
+        """Send a structured dashboard snapshot for firmware-side rendering.
+
+        Protocol: START -> DATA chunks -> COMMIT -> wait for refresh completion.
+
+        Args:
+            payload: DashboardSnapshotV1 binary payload (192 bytes)
+            crc32: CRC32 checksum of the payload
+            refresh_mode: "FULL" or "FAST" (only FULL supported in v1)
+
+        Returns:
+            True if refresh succeeded, False otherwise.
+        """
+        if len(payload) != 192:
+            raise BLETransportError(f"Invalid payload size: {len(payload)} (expected 192)")
+
+        # Map refresh mode
+        refresh_byte = 0 if refresh_mode == "FULL" else 1
+
+        # START command: [0x00, 0x78, version, flags, payload_len_le, crc32_le]
+        start_payload = CMD_DASHBOARD_RENDER_START + struct.pack(
+            "<BBHI",
+            1,  # version
+            0,  # flags (request FULL refresh)
+            len(payload),  # payload_len
+            crc32,  # crc32
+        )
+
+        resp = await self._send_command(start_payload)
+        if resp[0] != 0x00 or resp[1] != 0x78:
+            raise BLETransportError(f"DASHBOARD_RENDER_START failed: {resp.hex()}")
+
+        logger.info("Dashboard render START acknowledged")
+
+        # Send DATA chunks
+        offset = 0
+        while offset < len(payload):
+            chunk = payload[offset:offset + BLE_CHUNK_SIZE]
+            resp = await self._send_command(CMD_DASHBOARD_RENDER_DATA + chunk, timeout=10.0)
+            if resp[0] != 0x00 or resp[1] != 0x79:
+                raise BLETransportError(f"DASHBOARD_RENDER_DATA failed at offset {offset}")
+            offset += len(chunk)
+
+        logger.info("All dashboard data chunks sent")
+
+        # COMMIT command: [0x00, 0x7A, refresh_mode]
+        # Device sends ACK first, then renders (blocks ~15s), so allow longer timeout
+        commit_payload = CMD_DASHBOARD_RENDER_COMMIT + bytes([refresh_byte])
+        resp = await self._send_command(commit_payload, timeout=120.0)
+        if resp[0] != 0x00 or resp[1] != 0x7A:
+            raise BLETransportError(f"DASHBOARD_RENDER_COMMIT failed: {resp.hex()}")
+
+        logger.info("Dashboard render COMMIT acknowledged, waiting for refresh...")
+
+        # Clear state before waiting for refresh result
+        self._response_data.clear()
+        self._response_event.clear()
+
+        # Wait for refresh completion
+        refresh_resp = await self._wait_response(timeout=65.0)
+        if refresh_resp and len(refresh_resp) >= 2:
+            if refresh_resp[1] == 0x7B:
+                logger.info("Dashboard refresh succeeded")
+                return True
+            elif refresh_resp[1] == 0x7C:
+                logger.warning("Dashboard refresh timeout")
+                return False
+
+        return False
+
+    async def _send_plane(self, data: bytes, label: str) -> None:
+        """Send one plane of image data. Last chunk auto-triggers END in firmware."""
+        offset = 0
+        total = len(data)
+        while offset < total:
+            chunk = data[offset:offset + BLE_CHUNK_SIZE]
+            resp = await self._send_command(CMD_DIRECT_WRITE_DATA + chunk, timeout=15.0)
+            if resp[0] != 0x00:
+                raise BLETransportError(f"{label} DATA failed at offset {offset}/{total}")
+            if resp[1] == 0x72:
+                logger.info(f"{label} plane complete, auto-END triggered")
+                return
+            offset += len(chunk)
 
     async def _send_chunks(self, data: bytes) -> None:
         """Send data in BLE-sized chunks, waiting for ACK after each."""

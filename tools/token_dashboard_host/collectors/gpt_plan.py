@@ -4,24 +4,15 @@ import glob
 import json
 import logging
 import os
-from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 
 from ..config import CODEX_SESSIONS_DIR
+from ..renderer.snapshot import GPTPlanStatus
 
 logger = logging.getLogger(__name__)
 
 # China Standard Time offset
 _CST = timezone(timedelta(hours=8))
-
-
-@dataclass
-class GPTPlanStatus:
-    five_hour_percent: int = 0
-    five_hour_label: str = "--:--"
-    week_percent: int = 0
-    week_label: str = "--月--日"
-    available: bool = False
 
 
 def collect_gpt_plan() -> GPTPlanStatus:
@@ -35,7 +26,13 @@ def collect_gpt_plan() -> GPTPlanStatus:
         )
         if not files:
             logger.warning("No Codex session files found")
-            return GPTPlanStatus()
+            return GPTPlanStatus(
+                five_hour_percent=0,
+                five_hour_label="--:--",
+                week_percent=0,
+                week_label="--月--日",
+                available=False,
+            )
 
         # Read the latest file, search backwards for rate_limits
         for filepath in files[:3]:  # check up to 3 most recent files
@@ -44,11 +41,23 @@ def collect_gpt_plan() -> GPTPlanStatus:
                 return result
 
         logger.warning("No rate_limits found in recent Codex sessions")
-        return GPTPlanStatus()
+        return GPTPlanStatus(
+            five_hour_percent=0,
+            five_hour_label="--:--",
+            week_percent=0,
+            week_label="--月--日",
+            available=False,
+        )
 
     except Exception as e:
         logger.error(f"GPT plan collection failed: {e}")
-        return GPTPlanStatus()
+        return GPTPlanStatus(
+            five_hour_percent=0,
+            five_hour_label="--:--",
+            week_percent=0,
+            week_label="--月--日",
+            available=False,
+        )
 
 
 def _search_file_for_rate_limits(filepath: str) -> GPTPlanStatus | None:
@@ -79,16 +88,20 @@ def _search_file_for_rate_limits(filepath: str) -> GPTPlanStatus | None:
         if not primary or not secondary:
             continue
 
-        result = GPTPlanStatus(available=True)
+        result = GPTPlanStatus(
+            available=True,
+            five_hour_percent=int(primary.get("used_percent", 0)),
+            five_hour_label="--:--",
+            week_percent=int(secondary.get("used_percent", 0)),
+            week_label="--月--日",
+        )
 
         # Primary = 5-hour window
-        result.five_hour_percent = int(primary.get("used_percent", 0))
         resets_at = primary.get("resets_at")
         if resets_at:
             result.five_hour_label = _format_timestamp(resets_at, is_weekly=False)
 
         # Secondary = weekly window
-        result.week_percent = int(secondary.get("used_percent", 0))
         resets_at = secondary.get("resets_at")
         if resets_at:
             result.week_label = _format_timestamp(resets_at, is_weekly=True)

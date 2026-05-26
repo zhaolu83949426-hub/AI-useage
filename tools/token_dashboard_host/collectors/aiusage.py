@@ -1,88 +1,74 @@
-"""aiusage SQLite token usage collector."""
+"""aiusage API token usage collector."""
 
 import logging
-import sqlite3
-from dataclasses import dataclass, field
+import requests
 
-from ..config import AIUSAGE_DB_PATH
+from ..renderer.snapshot import ModelUsage
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass
-class ModelUsage:
-    model: str
-    provider: str
-    calls: int
-    total_tokens: int
+# AIUsage API endpoints
+AIUSAGE_API_URL = "http://localhost:3847/api/summary"
+AIUSAGE_MODELS_API_URL = "http://localhost:3847/api/models"
+AIUSAGE_RANGE_DAY = "day"
 
 
-@dataclass
 class TodayUsage:
-    total_tokens: int = 0
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cache_read_tokens: int = 0
-    top_models: list[ModelUsage] = field(default_factory=list)
+    """Today's aggregated token usage (legacy, for backward compatibility)."""
+
+    def __init__(
+        self,
+        total_tokens: int = 0,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cache_read_tokens: int = 0,
+        top_models: list[ModelUsage] | None = None,
+    ):
+        self.total_tokens = total_tokens
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+        self.cache_read_tokens = cache_read_tokens
+        self.top_models = top_models or []
 
 
 def collect_today_usage() -> TodayUsage:
-    """Read today's token usage from aiusage SQLite database."""
+    """Fetch today's token usage from AIUsage API."""
     try:
-        conn = sqlite3.connect(f"file:{AIUSAGE_DB_PATH}?mode=ro", uri=True)
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
+        # Fetch overview data
+        response = requests.get(f"{AIUSAGE_API_URL}?range={AIUSAGE_RANGE_DAY}", timeout=10)
+        response.raise_for_status()
+        data = response.json()
 
-        # Today overview
-        cur.execute("""
-            SELECT
-                COALESCE(SUM(input_tokens), 0) AS input_tokens,
-                COALESCE(SUM(output_tokens), 0) AS output_tokens,
-                COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-                COALESCE(SUM(
-                    input_tokens + output_tokens
-                    + cache_read_tokens + cache_write_tokens + thinking_tokens
-                ), 0) AS total_tokens
-            FROM records
-            WHERE date(ts / 1000, 'unixepoch', 'localtime') = date('now', 'localtime')
-        """)
-        row = cur.fetchone()
+        # Parse overview data
         result = TodayUsage(
-            total_tokens=row["total_tokens"],
-            input_tokens=row["input_tokens"],
-            output_tokens=row["output_tokens"],
-            cache_read_tokens=row["cache_read_tokens"],
+            total_tokens=data.get("totalTokens", 0),
+            input_tokens=data.get("inputTokens", 0),
+            output_tokens=data.get("outputTokens", 0),
+            cache_read_tokens=data.get("cacheReadTokens", 0),
         )
 
-        # Top 5 models
-        cur.execute("""
-            SELECT
-                model,
-                provider,
-                COUNT(*) AS calls,
-                SUM(
-                    input_tokens + output_tokens
-                    + cache_read_tokens + cache_write_tokens + thinking_tokens
-                ) AS total_tokens
-            FROM records
-            WHERE date(ts / 1000, 'unixepoch', 'localtime') = date('now', 'localtime')
-            GROUP BY model, provider
-            ORDER BY total_tokens DESC
-            LIMIT 5
-        """)
-        for row in cur.fetchall():
+        # Fetch models data
+        models_response = requests.get(f"{AIUSAGE_MODELS_API_URL}?range={AIUSAGE_RANGE_DAY}", timeout=10)
+        models_response.raise_for_status()
+        models_data = models_response.json()
+
+        # Parse models list
+        for model_data in models_data.get("models", []):
             result.top_models.append(ModelUsage(
-                model=row["model"],
-                provider=row["provider"],
-                calls=row["calls"],
-                total_tokens=row["total_tokens"],
+                model=model_data["model"],
+                provider=model_data.get("provider", "unknown"),
+                calls=model_data.get("callCount", 0),
+                total_tokens=model_data.get("totalTokens", 0),
+                share_percent=model_data.get("percentage", 0.0),
             ))
 
-        conn.close()
+        # API already returns sorted by percentage desc, take top 5
+        result.top_models = result.top_models[:5]
+
         return result
 
     except Exception as e:
-        logger.error(f"aiusage collection failed: {e}")
+        logger.error(f"aiusage API collection failed: {e}")
         return TodayUsage()
 
 

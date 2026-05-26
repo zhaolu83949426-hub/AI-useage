@@ -20,7 +20,13 @@ CODEX_SESSIONS_DIR = r"C:\Users\zhaolu\.codex\sessions"
 
 # GLM API
 GLM_API_BASE = "https://open.bigmodel.cn"
-GLM_API_TOKEN = os.getenv("TOKEN_DASHBOARD_GLM_API_TOKEN", "")
+# Try local config file first, then env var
+_glm_token_file = os.path.join(os.path.dirname(__file__), ".glm_token")
+if os.path.exists(_glm_token_file):
+    with open(_glm_token_file, "r") as f:
+        GLM_API_TOKEN = f.read().strip()
+else:
+    GLM_API_TOKEN = os.getenv("TOKEN_DASHBOARD_GLM_API_TOKEN", "")
 
 # Refresh
 REFRESH_INTERVAL_SECONDS = 300  # 5 minutes
@@ -31,3 +37,6 @@ BATTERY_VOLTAGE_MIN = 3.30
 
 # Alert threshold for plan progress bars
 PLAN_ALERT_THRESHOLD = 80
+
+# Render mode: "bitmap" or "firmware_render"
+TOKEN_DASHBOARD_RENDER_MODE = os.getenv("TOKEN_DASHBOARD_RENDER_MODE", "bitmap")
