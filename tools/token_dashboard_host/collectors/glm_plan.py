@@ -20,7 +20,7 @@ def collect_glm_plan() -> GLMPlanStatus:
             five_hour_percent=0,
             five_hour_label="--:--",
             week_percent=0,
-            week_label="--月--日",
+            week_label="--/--",
             available=False,
         )
 
@@ -39,7 +39,7 @@ def collect_glm_plan() -> GLMPlanStatus:
                 five_hour_percent=0,
                 five_hour_label="--:--",
                 week_percent=0,
-                week_label="--月--日",
+                week_label="--/--",
                 available=False,
             )
 
@@ -50,7 +50,7 @@ def collect_glm_plan() -> GLMPlanStatus:
             five_hour_percent=0,
             five_hour_label="--:--",
             week_percent=0,
-            week_label="--月--日",
+            week_label="--/--",
         )
 
         for limit in data.get("data", {}).get("limits", []):
@@ -74,7 +74,7 @@ def collect_glm_plan() -> GLMPlanStatus:
             five_hour_percent=0,
             five_hour_label="--:--",
             week_percent=0,
-            week_label="--月--日",
+            week_label="--/--",
             available=False,
         )
 
@@ -82,12 +82,12 @@ def collect_glm_plan() -> GLMPlanStatus:
 def _format_reset_time(timestamp_ms: int | float | None, is_weekly: bool) -> str:
     """Format millisecond timestamp to display label."""
     if not timestamp_ms:
-        return "--:--" if not is_weekly else "--月--日"
+        return "--:--" if not is_weekly else "--/--"
 
     try:
         dt = datetime.fromtimestamp(int(timestamp_ms) / 1000, tz=_CST)
         if is_weekly:
-            return f"{dt.month}月{dt.day}日"
+            return f"{dt.month}-{dt.day}"
         return dt.strftime("%H:%M")
     except (TypeError, ValueError, OSError):
-        return "--:--" if not is_weekly else "--月--日"
+        return "--:--" if not is_weekly else "--/--"

@@ -30,7 +30,7 @@ def collect_gpt_plan() -> GPTPlanStatus:
                 five_hour_percent=0,
                 five_hour_label="--:--",
                 week_percent=0,
-                week_label="--月--日",
+                week_label="--/--",
                 available=False,
             )
 
@@ -45,7 +45,7 @@ def collect_gpt_plan() -> GPTPlanStatus:
             five_hour_percent=0,
             five_hour_label="--:--",
             week_percent=0,
-            week_label="--月--日",
+            week_label="--/--",
             available=False,
         )
 
@@ -55,7 +55,7 @@ def collect_gpt_plan() -> GPTPlanStatus:
             five_hour_percent=0,
             five_hour_label="--:--",
             week_percent=0,
-            week_label="--月--日",
+            week_label="--/--",
             available=False,
         )
 
@@ -93,7 +93,7 @@ def _search_file_for_rate_limits(filepath: str) -> GPTPlanStatus | None:
             five_hour_percent=int(primary.get("used_percent", 0)),
             five_hour_label="--:--",
             week_percent=int(secondary.get("used_percent", 0)),
-            week_label="--月--日",
+            week_label="--/--",
         )
 
         # Primary = 5-hour window
@@ -116,7 +116,7 @@ def _format_timestamp(unix_seconds: int | float, is_weekly: bool) -> str:
     try:
         dt = datetime.fromtimestamp(int(unix_seconds), tz=_CST)
         if is_weekly:
-            return f"{dt.month}月{dt.day}日"
+            return f"{dt.month}-{dt.day}"
         return dt.strftime("%H:%M")
     except (OSError, ValueError):
-        return "--:--" if not is_weekly else "--月--日"
+        return "--:--" if not is_weekly else "--/--"

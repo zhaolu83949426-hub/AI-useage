@@ -241,10 +241,22 @@ async def run_cycle(transport: BLETransport) -> None:
     logger.info(f"Update {'succeeded' if success else 'failed'}")
 
 
+def calculate_next_aligned_time():
+    """Calculate next 5-minute mark + 5 second delay and wait seconds."""
+    now = datetime.now()
+    next_5_min = ((now.minute // 5) + 1) * 5
+    if next_5_min >= 60:
+        target = now.replace(hour=now.hour + 1, minute=0, second=5, microsecond=0)
+    else:
+        target = now.replace(minute=next_5_min, second=5, microsecond=0)
+    wait_seconds = (target - now).total_seconds()
+    return target, wait_seconds
+
+
 async def main_loop() -> None:
-    """Main event loop with 5-minute refresh interval."""
+    """Main event loop with 5-minute refresh aligned to marks + 5s delay."""
     logger.info("Token 用量看板 started")
-    logger.info(f"Refresh interval: {REFRESH_INTERVAL_SECONDS}s")
+    logger.info("Refresh aligned to 5-minute marks + 5s delay")
 
     transport = BLETransport()
 
@@ -257,9 +269,11 @@ async def main_loop() -> None:
         if transport.client and transport.client.is_connected:
             await transport.disconnect()
 
-    # Subsequent cycles on interval
+    # Subsequent cycles: align to 5-minute marks + 5s delay
     while True:
-        await asyncio.sleep(REFRESH_INTERVAL_SECONDS)
+        next_time, wait_seconds = calculate_next_aligned_time()
+        logger.info(f"Next update at {next_time.strftime('%H:%M:%S')} (waiting {wait_seconds:.1f}s)")
+        await asyncio.sleep(wait_seconds)
         try:
             await run_cycle(transport)
         except Exception:

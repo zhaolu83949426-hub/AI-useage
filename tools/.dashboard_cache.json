@@ -1,49 +1,37 @@
 {
   "version": "v1",
-  "total_tokens": 111388503,
-  "input_tokens": 9388040,
-  "output_tokens": 278711,
-  "cache_tokens": 101713344,
+  "total_tokens": 7631280,
+  "input_tokens": 291884,
+  "output_tokens": 28164,
+  "cache_tokens": 7311232,
   "glm_plan": {
     "available": true,
-    "five_hour_percent": 84,
-    "week_percent": 62,
-    "five_hour_label": "13:53",
-    "week_label": "5月27日"
+    "five_hour_percent": 25,
+    "week_percent": 34,
+    "five_hour_label": "13:33",
+    "week_label": "6-3"
   },
   "gpt_plan": {
     "available": true,
-    "five_hour_percent": 10,
-    "week_percent": 30,
-    "five_hour_label": "14:43",
-    "week_label": "5月31日"
+    "five_hour_percent": 33,
+    "week_percent": 42,
+    "five_hour_label": "21:29",
+    "week_label": "5-31"
   },
   "models": [
     {
-      "model": "glm-4.7",
-      "calls": 841,
-      "total_tokens": 92621134,
-      "share_percent": 84.8
-    },
-    {
       "model": "glm-5.1",
-      "calls": 115,
-      "total_tokens": 13160959,
-      "share_percent": 11.6
+      "calls": 121,
+      "total_tokens": 6530858,
+      "share_percent": 84.6
     },
     {
-      "model": "gpt-5.4",
-      "calls": 25,
-      "total_tokens": 4428959,
-      "share_percent": 2.5
-    },
-    {
-      "model": "unknown",
-      "calls": 8,
-      "total_tokens": 883560,
-      "share_percent": 0.8
+      "model": "glm-4.7",
+      "calls": 22,
+      "total_tokens": 1100422,
+      "share_percent": 15.4
     }
   ],
-  "hash": "943ee33b8a1cb0a96fb1ccd7a4af8b86",
-  "timestamp": "2026-05-26T13:08:27.054308"
+  "hash": "dd4af42297d57fcc5a8b1aeab3b6cbc3",
+  "timestamp": "2026-05-29T10:10:12.601121"
 }

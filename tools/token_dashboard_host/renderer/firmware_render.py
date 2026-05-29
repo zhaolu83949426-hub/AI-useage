@@ -113,7 +113,15 @@ def encode_snapshot_v1(snapshot: DashboardSnapshot) -> bytes:
         _encode_model_row(buffer, offset, None)
         offset += MODEL_ROW_SIZE
 
-    # Reserved (offset 189-191) - already zeroed
+    # Time sync data (bytes 189-191)
+    from datetime import datetime
+    now = datetime.now()
+    buffer[offset] = now.hour       # sync_hour
+    offset += 1
+    buffer[offset] = now.minute     # sync_minute
+    offset += 1
+    buffer[offset] = 0              # sync_flags (reserved)
+    offset += 1
 
     return bytes(buffer)
 

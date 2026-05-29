@@ -39,4 +39,4 @@ BATTERY_VOLTAGE_MIN = 3.30
 PLAN_ALERT_THRESHOLD = 80
 
 # Render mode: "bitmap" or "firmware_render"
-TOKEN_DASHBOARD_RENDER_MODE = os.getenv("TOKEN_DASHBOARD_RENDER_MODE", "bitmap")
+TOKEN_DASHBOARD_RENDER_MODE = os.getenv("TOKEN_DASHBOARD_RENDER_MODE", "firmware_render")
