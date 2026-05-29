@@ -14,77 +14,45 @@
 
 以上信息来自 `esptool` 与 Windows 设备枚举探测。
 
-## 当前状态
+## 当前配置
 
-当前 `esp32-N4` 已经可以在空配置启动时显示二维码。
+当前设备运行 **J-Calendar z21** 固件（`jcalendar-1.1.9/` 目录，`z21` 编译环境），叠加 Token 用量看板功能。
 
-本仓库现在为这块板内置了一份默认启动显示配置，启动日志中可看到：
+硬件接线：
 
-- `Applying built-in esp32-N4 4.2in tri-color display profile`
-- `Boot screen with QR rendered`
-- `EPD refresh: FULL (boot)`
+| 信号 | GPIO |
+|------|------|
+| `BUSY` | `4` |
+| `CS` | `5` |
+| `RST` | `16` |
+| `DC` | `17` |
+| `SCK` | `18` |
+| `MOSI` | `23` |
+| 电池 ADC | `32` |
+| 按钮 | `14` (另一端 GND) |
 
-实测一次完整刷新耗时约 `22.5s`。
+## 屏幕型号确认
 
-## 之前为什么不显示二维码
+当前使用的 4.2 寸黑白红三色墨水屏，按 `jcalendar-1.1.9` 固件的驱动映射：
 
-当前固件的启动链路是：
+- `SI_DRIVER=21` 对应 `z21` 环境
+- 适用于 SES 拆机屏，丝印为 `A13600**`
 
-1. `loadGlobalConfig()` 从 LittleFS 读取二进制配置
-2. 解析到至少一个 `display` 配置块后，`globalConfig.display_count` 才会大于 `0`
-3. `initDisplay()` 只有在 `globalConfig.display_count > 0` 时才会初始化屏幕
-4. `writeBootScreenWithQr()` 只会在屏幕初始化分支内执行
+如需更换屏幕，参考 [jcalendar-1.1.9/README.md](../jcalendar-1.1.9/README.md) Q&A 第 4 项的丝印对照表选择对应固件环境。
 
-在补默认板型前，实机日志是：
+## 烧录参考
 
-- `Global configuration load failed or no config found`
-- `No display found`
+```bash
+cd jcalendar-1.1.9
+pio run -e z21
 
-这说明当时的问题不是“二维码绘制失败”，而是“固件没有拿到任何显示屏配置，所以根本没有进入二维码绘制流程”。
-
-## 和 4.2 寸三色墨水屏相关的候选面板
-
-卖家口径是“ESP32 + 4.2 寸黑白红三色墨水屏”。结合仓库里的面板映射，最接近的候选是：
-
-- `0x000F` -> `EP42R_400x300`
-- `0x0010` -> `EP42R2_400x300`
-
-其中 `bb_epaper` 库里能确认：
-
-- `EP42R_400x300`：4.2 寸 `400x300` 黑白红三色屏
-- `EP42R2_400x300`：4.2 寸 `400x300` 黑白红三色屏，注释标注为 `GDEQ042Z21`
-- `0x003A` -> `EP42YR_400x300`：4 色屏，更像黄红混合类型，不符合当前卖家描述
-
-所以按现有信息，优先怀疑你的屏幕属于 `0x000F` 或 `0x0010`，而不是 `0x003A`。
-
-## 当前默认启动配置
-
-当前仓库里已经为 `esp32-N4` 补了一份默认启动配置，参数如下：
-
-- `panel_ic_type = 0x0010`
-- `pixel_width = 400`
-- `pixel_height = 300`
-- `color_scheme = 0x1`
-- `reset_pin = 16`
-- `busy_pin = 4`
-- `dc_pin = 17`
-- `cs_pin = 5`
-- `data_pin = 23`
-- `clk_pin = 18`
-
-## 仍建议核对的板级信息
-
-要让后续自定义固件完全和实物板一致，仍建议继续核对下面这些字段：
-
-- `panel_ic_type`
-- `pixel_width` / `pixel_height`
-- `reset_pin`
-- `busy_pin`
-- `dc_pin`
-- `cs_pin`
-- `data_pin`
-- `clk_pin`
-- `color_scheme`
-- 如有独立供电控制，还需要 `system_config.pwr_pin`
-
-这些引脚和面板型号信息，当前仓库里没有 `esp32-N4` 的默认板型，也没有自动探测逻辑，所以不能仅靠现在这份固件自动识别出来。
+PYTHONIOENCODING=utf-8 "$HOME/.platformio/penv/Scripts/esptool.exe" \
+  --chip esp32 --port COM4 --baud 115200 \
+  --before default-reset --after hard-reset \
+  write-flash -z --flash-mode dio --flash-freq 40m --flash-size detect \
+  0x1000 .pio/build/z21/bootloader.bin \
+  0x8000 .pio/build/z21/partitions.bin \
+  0xe000 "$HOME/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin" \
+  0x10000 .pio/build/z21/firmware.bin \
+  2>&1 | cat
+```

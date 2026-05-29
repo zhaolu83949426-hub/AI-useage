@@ -2,11 +2,14 @@
 
 ## 项目概述
 
-Token 用量看板是一个基于 ESP32-N4 和 400x300 黑白红三色墨水屏的实时数据显示系统。通过 BLE 从 AIUsage HTTP API 获取 Token 使用数据，每 5 分钟自动刷新显示。
+Token 用量看板是一个基于 ESP32 和 400×300 黑白红三色墨水屏的 AI 用量监控显示系统。主机端 Python 程序定时采集 AI 服务用量数据，通过 BLE 推送到 ESP32 设备，设备在墨水屏上渲染看板页面。
+
+设备端固件基于 **J-Calendar** (jcalendar-1.1.9) `z21` 环境，内嵌看板渲染模块。
 
 ### 主要功能
+
 - 今日 Token 总量、输入、输出、缓存统计
-- GLM CodingPlan 和 GPT Plus 套餐用量（5小时/一周）
+- GLM CodingPlan 和 GPT Plus 套餐用量（5 小时 / 一周窗口）
 - Top 4 模型调用排行及占比
 - 设备电池电量显示
 - 5 分钟自动刷新 + 数据变更缓存机制
@@ -16,56 +19,74 @@ Token 用量看板是一个基于 ESP32-N4 和 400x300 黑白红三色墨水屏�
 ## 环境要求
 
 ### 硬件
-- ESP32-N4 开发板（COM4 口）
-- 4.2 寸 400x300 黑白红三色墨水屏
-- BLE 支持的设备（用于 Host 端通信）
+
+- ESP32 开发板
+- 4.2 寸 400×300 黑白红三色墨水屏
+- 蓝牙支持的电脑（用于 Host 端 BLE 通信）
+
+### 固件硬件配置
+
+| 项目 | 值 |
+|------|-----|
+| 固件工程 | `jcalendar-1.1.9/` |
+| 编译环境 | `z21` |
+| 分辨率 | `400 × 300` |
+| 分页高度 | `32` |
+| `BUSY` | `GPIO4` |
+| `CS` | `GPIO5` |
+| `RST` | `GPIO16` |
+| `DC` | `GPIO17` |
+| `CLK` | `GPIO18` |
+| `DIN` | `GPIO23` |
+| 电池采样脚 | `GPIO32` |
+| BLE Service UUID | `00002446-0000-1000-8000-00805F9B34FB` |
 
 ### 软件
+
 - Python 3.8+
 - PlatformIO（用于固件编译上传）
-- AIUsage HTTP API（需在本地运行 `http://localhost:3847`）
 - Windows 操作系统（自启动脚本为 PowerShell）
 
 ---
 
 ## 安装步骤
 
-### 1. 克隆项目
-```bash
-cd D:\open-sprout\AI-Usage\AI-Usage
-```
+### 1. 安装 Python 依赖
 
-### 2. 安装 Python 依赖
 ```bash
 pip install pillow requests bleak
 ```
 
-### 3. 配置 GLM API Token
+### 2. 配置 GLM API Token
 
-创建 `.glm_token` 文件（用于获取 CodingPlan 数据）：
-```bash
-# 文件位置：tools/token_dashboard_host/.glm_token
-# 内容：你的 GLM API Key
-58b7cd94bc054d7c98f20d2f2c8dbbb5.k6hVKo0VDVb0CmBV
+创建 `tools/token_dashboard_host/.glm_token` 文件（用于获取 CodingPlan 数据）：
+
+```
+你的GLM_API_KEY
 ```
 
-或设置环境变量（不推荐，Python 进程可能读取不到）：
-```powershell
-[System.Environment]::SetEnvironmentVariable('TOKEN_DASHBOARD_GLM_API_TOKEN', '你的key', 'User')
-```
-
-### 4. 编译并上传固件
+### 3. 编译并上传固件
 
 ```bash
-cd firmware
-pio run --target upload
+cd jcalendar-1.1.9
+pio run -e z21
 ```
 
-确保 ESP32-N4 连接到 COM4 口。如需修改串口，编辑 `firmware/platformio.ini`：
-```ini
-[env:esp32-n4]
-upload_port = COM4
+烧录（推荐 esptool 直接烧录，避免编码问题）：
+
+```bash
+PYTHONIOENCODING=utf-8 "$HOME/.platformio/penv/Scripts/esptool.exe" \
+  --chip esp32 --port COM4 --baud 115200 \
+  --before default-reset --after hard-reset \
+  write-flash -z --flash-mode dio --flash-freq 40m --flash-size detect \
+  0x1000 .pio/build/z21/bootloader.bin \
+  0x8000 .pio/build/z21/partitions.bin \
+  0xe000 "$HOME/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin" \
+  0x10000 .pio/build/z21/firmware.bin \
+  2>&1 | cat
 ```
+
+将 `COM4` 替换成你的实际串口。
 
 ---
 
@@ -74,22 +95,30 @@ upload_port = COM4
 ### 渲染模式
 
 编辑 `tools/token_dashboard_host/config.py`：
+
 ```python
 TOKEN_DASHBOARD_RENDER_MODE = "bitmap"  # 推荐：Host 端渲染，字体清晰
 # TOKEN_DASHBOARD_RENDER_MODE = "firmware_render"  # 设备端渲染，传输快
 ```
 
+两种模式：
+
+- `bitmap`：Host 渲染完整图像，通过 `0x0070/0x0071/0x0072` 发送黑白红双平面位图
+- `firmware_render`：Host 发送 192B `DashboardSnapshotV1`，设备通过 `0x0078/0x0079/0x007A` 在本地渲染
+
 ### 刷新间隔
 
 ```python
-REFRESH_INTERVAL_SECONDS = 300  # 5 分钟，可根据需要调整
+REFRESH_INTERVAL_SECONDS = 300  # 5 分钟
 ```
 
 ### 数据源
 
-看板从以下 API 获取数据：
-- AIUsage 概览：`http://localhost:3847/api/summary?range=day`
-- AIUsage 模型：`http://localhost:3847/api/models?range=day`
+看板从以下来源获取数据：
+
+- AIUsage API：`http://localhost:3847/api/summary?range=day` 和 `/api/models?range=day`
+- GLM 套餐：`https://open.bigmodel.cn/api/monitor/usage/quota/limit`
+- GPT 套餐：Codex 本地会话日志中的 `rate_limits` 数据
 
 确保 AIUsage 服务已启动。
 
@@ -100,27 +129,19 @@ REFRESH_INTERVAL_SECONDS = 300  # 5 分钟，可根据需要调整
 ### 手动启动
 
 ```bash
-cd D:\open-sprout\AI-Usage\AI-Usage
 python -m tools.token_dashboard_host.main
 ```
 
 ### 设置开机自启动
 
-运行 PowerShell 脚本（以管理员身份）：
-
 ```powershell
-cd D:\open-sprout\AI-Usage\AI-Usage\tools\token_dashboard_host
+cd tools\token_dashboard_host
 .\setup_autostart.ps1
 ```
 
 该脚本会创建：
-1. **启动文件夹快捷方式**（当前用户）
-   - 位置：`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\Token Dashboard.lnk`
-   
-2. **任务计划程序任务**（更可靠，后台运行）
-   - 任务名：`TokenDashboardAutoStart`
-   - 触发器：用户登录时
-   - 设置：允许使用电池、不停止任务、启动时立即运行
+1. **启动文件夹快捷方式**（当前用户 Startup 目录）
+2. **任务计划程序任务**（`TokenDashboardAutoStart`，用户登录时触发）
 
 ### 取消自启动
 
@@ -134,31 +155,27 @@ cd D:\open-sprout\AI-Usage\AI-Usage\tools\token_dashboard_host
 
 ### 查看日志
 
-运行时日志会输出到控制台：
+运行时日志输出到控制台：
+
 ```
 2026-05-26 12:00:15 [INFO] dashboard: Token 用量看板 started
 2026-05-26 12:00:15 [INFO] dashboard: Collecting data...
 2026-05-26 12:00:19 [INFO] dashboard: Connecting to device...
 2026-05-26 12:00:22 [INFO] dashboard: Device: WiFi=disconnected, battery=100%
-2026-05-26 12:00:22 [INFO] dashboard: Data changed since last cycle, proceeding with update
+2026-05-26 12:00:22 [INFO] dashboard: Data changed, proceeding with update
 2026-05-26 12:00:22 [INFO] dashboard: Update succeeded
 ```
 
 ### Debug 图片
 
-每次更新会生成 `dashboard_debug.png`，可用图片查看器查看渲染结果。
+`bitmap` 模式下每次更新会生成 `dashboard_debug.png`。
 
 ### 缓存文件
 
 位置：`.dashboard_cache.json`（项目根目录）
 
-查看缓存内容：
 ```bash
-cat .dashboard_cache.json
-```
-
-清除缓存（强制下次更新）：
-```bash
+# 清除缓存（强制下次更新）
 del .dashboard_cache.json
 ```
 
@@ -166,108 +183,36 @@ del .dashboard_cache.json
 
 ## 故障排查
 
-### 问题：数据为空，只有套餐信息
+### 数据为空，只有套餐信息
 
-**原因**：旧进程仍在运行，使用的是 SQLite 数据源
+旧进程仍在运行，使用了错误的数据源。
 
-**解决**：
 ```powershell
-# 停止所有 Python 进程
 Get-Process python | Stop-Process -Force
-
-# 重新启动
 python -m tools.token_dashboard_host.main
 ```
 
-### 问题：GLM CodingPlan 数据为空
+### GLM CodingPlan 数据为空
 
-**原因**：GLM API Token 未配置
+检查 `tools/token_dashboard_host/.glm_token` 文件是否存在且内容正确。
 
-**解决**：
-1. 检查 `.glm_token` 文件是否存在
-2. 文件内容是否正确（仅包含 API Key，无换行）
-3. 查看日志是否有 "GLM_API_TOKEN not configured" 警告
+### 设备连接失败
 
-### 问题：设备连接失败
+1. 检查 ESP32 是否连接到正确串口
+2. 按 RST 按钮重启设备
+3. 检查是否有其他 BLE 连接占用
+4. 日志中 BLE 设备名应以 `OD` 开头
 
-**原因**：设备未插入或 BLE 被占用
+### 界面显示异常
 
-**解决**：
-1. 检查 ESP32-N4 是否连接到 COM4
-2. 重启设备：按 RST 按钮
-3. 检查是否有其他 BLE 连接
-4. 查看日志中的 BLE 设备名称（应为 "OD" 开头）
+固件与 Host 端渲染模式不匹配时：
 
-### 问题：界面显示异常
-
-**原因**：固件与 Host 端模式不匹配
-
-**解决**：
 ```bash
 # 重新编译上传固件
-cd firmware
-pio run --target upload
+cd jcalendar-1.1.9
+pio run -e z21 -t upload
 
-# 确认 Host 端配置
-# config.py 中 TOKEN_DASHBOARD_RENDER_MODE = "bitmap"
-```
-
-### 问题：自启动失败
-
-**原因**：Task Scheduler 权限不足或路径错误
-
-**解决**：
-1. 以管理员身份运行 `setup_autostart.ps1`
-2. 检查启动文件夹快捷方式是否存在
-3. 手动运行命令测试是否正常
-
----
-
-## API 接口说明
-
-### AIUsage API
-
-**概览数据**
-```
-GET http://localhost:3847/api/summary?range=day
-```
-响应：
-```json
-{
-  "totalTokens": 88077530,
-  "inputTokens": 7651407,
-  "outputTokens": 222925,
-  "cacheReadTokens": 80196224,
-  "cacheWriteTokens": 0,
-  "thinkingTokens": 6974
-}
-```
-
-**模型排行**
-```
-GET http://localhost:3847/api/models?range=day
-```
-响应：
-```json
-{
-  "models": [
-    {
-      "model": "glm-4.7",
-      "provider": "zhipu",
-      "callCount": 567,
-      "totalTokens": 70193721,
-      "percentage": 79.9
-    }
-  ]
-}
-```
-
-### GLM API
-
-**套餐查询**
-```
-POST https://open.bigmodel.cn/api/paas/v4/chat
-Authorization: Bearer <YOUR_TOKEN>
+# 确认 config.py 中 TOKEN_DASHBOARD_RENDER_MODE 与固件支持一致
 ```
 
 ---
@@ -275,23 +220,35 @@ Authorization: Bearer <YOUR_TOKEN>
 ## 文件结构
 
 ```
+jcalendar-1.1.9/
+├── platformio.ini           # PlatformIO 构建配置（z21/z15/z98/1680 环境）
+├── README.md                # 固件功能介绍
+└── src/
+    ├── main.cpp             # 入口
+    ├── app_config.h         # 引脚、BLE 常量
+    ├── protocol.cpp/h       # BLE 命令分发
+    ├── ble_service.cpp/h    # BLE 初始化和广播
+    ├── display_service.cpp/h      # 显示驱动
+    ├── dashboard_protocol.cpp/h   # 看板快照协议状态机
+    └── dashboard_renderer.cpp/h   # 看板模板渲染
+
 tools/token_dashboard_host/
-├── main.py                 # 主入口
-├── config.py               # 全局配置
+├── main.py                  # 主入口
+├── config.py                # 全局配置
 ├── collectors/
-│   ├── aiusage.py         # AIUsage API 数据收集
-│   ├── glm_plan.py        # GLM CodingPlan 数据收集
-│   └── gpt_plan.py        # GPT Plus 套餐数据收集
+│   ├── aiusage.py           # AIUsage API 数据收集
+│   ├── glm_plan.py          # GLM CodingPlan 数据收集
+│   └── gpt_plan.py          # GPT Plus 套餐数据收集
 ├── renderer/
-│   ├── dashboard.py       # PIL 渲染实现
-│   ├── bitmap.py          # RGB → 黑白红位平面转换
-│   └── snapshot.py        # 数据快照结构
+│   ├── dashboard.py         # PIL 渲染（bitmap 模式）
+│   ├── bitmap.py            # RGB → 黑白红位平面转换
+│   ├── firmware_render.py   # DashboardSnapshotV1 编码器
+│   └── snapshot.py          # 数据快照结构
 ├── ble/
-│   ├── transport.py       # BLE 传输层
-│   └── protocol.py        # BLE 协议定义
-├── setup_autostart.ps1    # 自启动安装脚本
-├── remove_autostart.ps1   # 自启动卸载脚本
-└── .glm_token             # GLM API Token 配置
+│   └── transport.py         # BLE 传输层
+├── setup_autostart.ps1      # 自启动安装脚本
+├── remove_autostart.ps1     # 自启动卸载脚本
+└── .glm_token               # GLM API Token 配置
 ```
 
 ---
@@ -305,9 +262,6 @@ python -m tools.token_dashboard_host.main
 # 停止看板
 Get-Process python | Stop-Process -Force
 
-# 查看日志
-# 日志直接输出到控制台
-
 # 清除缓存
 del .dashboard_cache.json
 
@@ -315,19 +269,21 @@ del .dashboard_cache.json
 curl http://localhost:3847/api/summary?range=day
 curl http://localhost:3847/api/models?range=day
 
-# 重新上传固件
-cd firmware
-pio run --target upload
+# 编译固件
+cd jcalendar-1.1.9
+pio run -e z21
 
-# 查看调试图片
-# 查看项目根目录下的 dashboard_debug.png
+# 烧录固件 (esptool)
+PYTHONIOENCODING=utf-8 "$HOME/.platformio/penv/Scripts/esptool.exe" \
+  --chip esp32 --port COM4 --baud 115200 \
+  --before default-reset --after hard-reset \
+  write-flash -z --flash-mode dio --flash-freq 40m --flash-size detect \
+  0x1000 .pio/build/z21/bootloader.bin \
+  0x8000 .pio/build/z21/partitions.bin \
+  0xe000 "$HOME/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin" \
+  0x10000 .pio/build/z21/firmware.bin \
+  2>&1 | cat
+
+# 查看调试图片 (bitmap 模式)
+# 项目根目录下 dashboard_debug.png
 ```
-
----
-
-## 联系支持
-
-如有问题，请查看：
-1. 代码注释：`tools/token_dashboard_host/*.py`
-2. 设计文档：`docs/token-usage-dashboard-detailed-design.md`
-3. 固件代码：`firmware/src/`
