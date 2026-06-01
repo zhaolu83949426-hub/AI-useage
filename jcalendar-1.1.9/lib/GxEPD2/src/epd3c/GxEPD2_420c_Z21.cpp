@@ -18,6 +18,12 @@
 #define Z21_FAST_T3  6
 #define Z21_FAST_T4 35
 
+// B→W 专用参数：加强黑→白驱动力，消除进度条回退时的墨水残留
+#define Z21_FAST_BW_T1 45
+#define Z21_FAST_BW_T2  3
+#define Z21_FAST_BW_T3 15
+#define Z21_FAST_BW_T4 45
+
 const unsigned char GxEPD2_420c_Z21::lut_20_vcom0_partial[] PROGMEM =
 {
   0x01,
@@ -38,7 +44,7 @@ const unsigned char GxEPD2_420c_Z21::lut_21_ww_partial[] PROGMEM =
 
 const unsigned char GxEPD2_420c_Z21::lut_22_bw_partial[] PROGMEM =
 {
-  0x01, 0x80 + Z21_FAST_T1, 0x80 + Z21_FAST_T2, 0x40 + Z21_FAST_T3, 0x40 + Z21_FAST_T4, 0x01, 0x00,
+  0x01, 0x80 + Z21_FAST_BW_T1, 0x80 + Z21_FAST_BW_T2, 0x80 + Z21_FAST_BW_T3, 0x40 + Z21_FAST_BW_T4, 0x01, 0x00,
   0x01, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00,
 };
 

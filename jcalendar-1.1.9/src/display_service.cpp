@@ -375,6 +375,16 @@ bool render_dashboard_fast(const DashboardDataV1& data) {
         return false;
     }
 
+    // 行数变化时 BWR 屏 BW 模式无法正确驱动红色粒子，必须回退全刷
+    if (data.row_count != g_dashboardRenderState.last_data.row_count) {
+        return false;
+    }
+
+    // 连续快刷超过维护间隔，回退全刷以消除红色粒子累积漂移
+    if (g_dashboardRenderState.fast_refresh_count >= app::kFastRefreshMaintenanceInterval) {
+        return false;
+    }
+
     uint8_t battery_pct = read_battery_percent();
     display.setPartialWindow(0, 0, app::kDisplayWidth, app::kDisplayHeight);
     display.firstPage();
