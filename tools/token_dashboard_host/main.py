@@ -121,8 +121,6 @@ async def _run_firmware_render_mode(transport: BLETransport, snapshot: Dashboard
 # Cache file path
 _CACHE_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".dashboard_cache.json")
 _CACHE_VERSION = "v2"
-_FAST_REFRESH_COUNT = 0
-_LAST_FULL_REFRESH_HOUR: str | None = None
 
 
 def _snapshot_to_cache_dict(snapshot: DashboardSnapshot) -> dict:
@@ -188,32 +186,11 @@ def _save_cache(cache_dict: dict, cache_hash: str) -> None:
         pass
 
 
-def _select_refresh_mode(device_status: DeviceStatus, now: datetime) -> str:
-    global _FAST_REFRESH_COUNT, _LAST_FULL_REFRESH_HOUR
-
-    hour_key = now.strftime("%Y-%m-%dT%H")
+def _select_refresh_mode(device_status: DeviceStatus) -> str:
     logger.info(f"MSD partial_baseline_ready={int(device_status.partial_baseline_ready)}")
     if not device_status.partial_baseline_ready:
         return "FULL"
-    if _LAST_FULL_REFRESH_HOUR != hour_key:
-        logger.info("Hourly full refresh triggered")
-        return "FULL"
-    if _FAST_REFRESH_COUNT >= 12:
-        logger.info("Maintenance full refresh triggered")
-        return "FULL"
     return "FAST"
-
-
-def _record_refresh_result(refresh_mode: str, success: bool, now: datetime) -> None:
-    global _FAST_REFRESH_COUNT, _LAST_FULL_REFRESH_HOUR
-
-    if not success:
-        return
-    if refresh_mode == "FULL":
-        _FAST_REFRESH_COUNT = 0
-        _LAST_FULL_REFRESH_HOUR = now.strftime("%Y-%m-%dT%H")
-        return
-    _FAST_REFRESH_COUNT += 1
 
 
 async def run_cycle(transport: BLETransport) -> None:
@@ -231,7 +208,7 @@ async def run_cycle(transport: BLETransport) -> None:
 
     # 3. Connect to device and read status
     device_status = None
-    refresh_mode = "FULL"
+    refresh_mode = "FAST"
     if TOKEN_DASHBOARD_RENDER_MODE == "bitmap":
         logger.info("Connecting to device...")
         await transport.connect()
@@ -248,7 +225,7 @@ async def run_cycle(transport: BLETransport) -> None:
     # 4. Build unified snapshot
     now = datetime.now()
     if TOKEN_DASHBOARD_RENDER_MODE == "firmware_render" and device_status:
-        refresh_mode = _select_refresh_mode(device_status, now)
+        refresh_mode = _select_refresh_mode(device_status)
         logger.info(f"Selected refresh mode: {refresh_mode}")
     last_refresh = now.strftime("%H:%M")
     snapshot = _build_dashboard_snapshot(usage, glm_plan, gpt_plan, device_status, last_refresh)
@@ -258,14 +235,11 @@ async def run_cycle(transport: BLETransport) -> None:
     cache_hash = _compute_cache_hash(cache_dict)
     last_cache = _load_last_cache()
 
-    if last_cache and last_cache.get("hash") == cache_hash and refresh_mode != "FULL":
+    if last_cache and last_cache.get("hash") == cache_hash:
         logger.info("Data unchanged from last cycle, skipping update")
         return
 
-    if last_cache and last_cache.get("hash") == cache_hash:
-        logger.info("Data unchanged, proceeding with scheduled full refresh")
-    else:
-        logger.info("Data changed since last cycle, proceeding with update")
+    logger.info("Data changed since last cycle, proceeding with update")
     _save_cache(cache_dict, cache_hash)
 
     # 6. Send based on render mode
@@ -278,8 +252,6 @@ async def run_cycle(transport: BLETransport) -> None:
         return
 
     logger.info(f"Update {'succeeded' if success else 'failed'}")
-    if TOKEN_DASHBOARD_RENDER_MODE == "firmware_render":
-        _record_refresh_result(refresh_mode, success, now)
 
 
 def calculate_next_aligned_time():
