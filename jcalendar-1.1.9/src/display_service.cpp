@@ -374,9 +374,6 @@ bool render_dashboard_fast(const DashboardDataV1& data) {
     if (!g_dashboardRenderState.partial_baseline_ready) {
         return false;
     }
-    if (g_dashboardRenderState.fast_refresh_count >= app::kFastRefreshMaintenanceInterval) {
-        return false;
-    }
 
     uint8_t battery_pct = read_battery_percent();
     display.setPartialWindow(0, 0, app::kDisplayWidth, app::kDisplayHeight);
