@@ -110,7 +110,7 @@ uint16_t dashboard_handle_commit(
     if (ctx.state != DASHBOARD_STATE_READY_TO_COMMIT) {
         return build_error_response(0x7A, DASHBOARD_ERR_STATE_MACHINE, response);
     }
-    if (refresh_mode != 0) {
+    if (refresh_mode != DASHBOARD_REFRESH_MODE_FULL && refresh_mode != DASHBOARD_REFRESH_MODE_FAST) {
         return build_error_response(0x7A, DASHBOARD_ERR_REFRESH_MODE_UNSUPPORTED, response);
     }
 

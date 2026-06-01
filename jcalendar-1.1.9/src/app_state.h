@@ -5,6 +5,7 @@
 
 #include "app_config.h"
 #include "dashboard_protocol.h"
+#include "dashboard_renderer.h"
 #include "ring_queue.h"
 
 enum class DeferredJob : uint8_t {
@@ -27,6 +28,13 @@ struct DirectWriteState {
     uint8_t red_plane[app::kPlaneSize] = {};
 };
 
+struct DashboardRenderState {
+    bool partial_baseline_ready = false;
+    uint8_t fast_refresh_count = 0;
+    uint8_t last_battery_percent = 0;
+    DashboardDataV1 last_data = {};
+};
+
 extern NimBLEServer* g_bleServer;
 extern NimBLEService* g_bleService;
 extern NimBLECharacteristic* g_bleCharacteristic;
@@ -40,5 +48,7 @@ extern PacketQueue<app::kCommandQueueSize, app::kMaxPacketSize> g_commandQueue;
 extern PacketQueue<app::kResponseQueueSize, app::kMaxPacketSize> g_responseQueue;
 extern DirectWriteState g_directWriteState;
 extern DashboardProtocolContext g_dashboardContext;
+extern DashboardRenderState g_dashboardRenderState;
+extern uint8_t g_requestedRefreshMode;
 extern DeferredJob g_deferredJob;
 extern uint32_t g_deferredJobReadyAtMs;

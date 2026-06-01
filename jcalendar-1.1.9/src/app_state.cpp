@@ -13,5 +13,7 @@ PacketQueue<app::kCommandQueueSize, app::kMaxPacketSize> g_commandQueue;
 PacketQueue<app::kResponseQueueSize, app::kMaxPacketSize> g_responseQueue;
 DirectWriteState g_directWriteState;
 DashboardProtocolContext g_dashboardContext;
+DashboardRenderState g_dashboardRenderState;
+uint8_t g_requestedRefreshMode = app::kRefreshModeFull;
 DeferredJob g_deferredJob = DeferredJob::None;
 uint32_t g_deferredJobReadyAtMs = 0;

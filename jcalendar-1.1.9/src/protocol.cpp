@@ -175,6 +175,7 @@ void handle_dashboard_commit(uint8_t refresh_mode) {
     );
     queue_bytes(response, response_len);
     if (should_render) {
+        g_requestedRefreshMode = refresh_mode;
         schedule_job(DeferredJob::DashboardRender);
     }
 }
@@ -211,6 +212,7 @@ void refresh_msd_payload() {
     g_msdPayload[15] = static_cast<uint8_t>(((voltage_10mv >> 8) & 0x01) |
         ((g_rebootFlag ? 1 : 0) << 1) |
         ((g_connectionRequested ? 1 : 0) << 2) |
+        (g_dashboardRenderState.partial_baseline_ready ? app::kMsdFlagPartialBaselineReady : 0) |
         ((g_mloopCounter & 0x0F) << 4));
     g_mloopCounter = static_cast<uint8_t>((g_mloopCounter + 1) & 0x0F);
 }
@@ -259,7 +261,17 @@ void process_deferred_job() {
 
     DashboardDataV1 dashboard_data;
     bool parsed = dashboard_parse_v1(g_dashboardContext.payload_buffer, g_dashboardContext.received_bytes, &dashboard_data);
-    bool ok = parsed && render_dashboard(dashboard_data);
+    bool ok = false;
+    if (parsed) {
+        if (g_requestedRefreshMode == app::kRefreshModeFast) {
+            ok = render_dashboard_fast(dashboard_data);
+            if (!ok) {
+                ok = render_dashboard_full(dashboard_data);
+            }
+        } else {
+            ok = render_dashboard_full(dashboard_data);
+        }
+    }
     dashboard_reset(g_dashboardContext);
     g_deferredJob = DeferredJob::None;
     queue_simple_response(0x00, ok ? 0x7B : 0x7C);

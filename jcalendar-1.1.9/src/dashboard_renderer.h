@@ -29,4 +29,3 @@ typedef struct {
 } DashboardDataV1;
 
 bool dashboard_parse_v1(const uint8_t* payload, uint32_t len, DashboardDataV1* data);
-bool render_dashboard(const DashboardDataV1& data);

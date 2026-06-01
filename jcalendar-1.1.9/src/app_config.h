@@ -33,10 +33,15 @@ constexpr size_t kResponseQueueSize = 16;
 constexpr uint8_t kCidLow = 0x46;
 constexpr uint8_t kCidHigh = 0x24;
 constexpr uint8_t kFirmwareMajor = 0;
-constexpr uint8_t kFirmwareMinor = 2;
+constexpr uint8_t kFirmwareMinor = 3;
 
 constexpr uint8_t kRefreshModeFull = 0;
 constexpr uint8_t kRefreshModeFast = 1;
+constexpr uint8_t kMsdFlagPartialBaselineReady = 1 << 3;
+constexpr uint8_t kFastRefreshMaintenanceInterval = 12;
+constexpr uint8_t kFastRefreshBatteryThresholdPercent = 2;
+constexpr uint8_t kMaxFastRefreshRects = 4;
+constexpr uint32_t kMaxFastRefreshArea = kDisplayWidth * 120;
 
 constexpr uint32_t kDeferredRenderDelayMs = 80;
 

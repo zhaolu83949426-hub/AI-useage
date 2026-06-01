@@ -39,9 +39,10 @@ class GPTPlanStatus(PlanStatus):
 @dataclass
 class DeviceStatus:
     """Device hardware status."""
-    wifi_connected: bool
-    battery_percent: int
-    available: bool
+    wifi_connected: bool = False
+    battery_percent: int = 0
+    available: bool = False
+    partial_baseline_ready: bool = False
 
 
 @dataclass

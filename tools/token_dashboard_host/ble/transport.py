@@ -81,8 +81,10 @@ class BLETransport:
             voltage_raw = ((msd[15] & 0x01) << 8) | msd[14]
             voltage_mv = voltage_raw * 10
             battery_pct = _voltage_to_percent(voltage_mv / 1000.0)
+            partial_baseline_ready = bool(msd[15] & 0x08)
         else:
             battery_pct = 0
+            partial_baseline_ready = False
 
         # Check for wifi_connected byte (firmware extension)
         wifi_connected = False
@@ -93,6 +95,7 @@ class BLETransport:
             wifi_connected=wifi_connected,
             battery_percent=battery_pct,
             available=True,
+            partial_baseline_ready=partial_baseline_ready,
         )
 
     async def send_3color_image(self, black_plane: bytes, red_plane: bytes) -> bool:
@@ -161,7 +164,7 @@ class BLETransport:
         Args:
             payload: DashboardSnapshotV1 binary payload (192 bytes)
             crc32: CRC32 checksum of the payload
-            refresh_mode: "FULL" or "FAST" (only FULL supported in v1)
+            refresh_mode: "FULL" or "FAST"
 
         Returns:
             True if refresh succeeded, False otherwise.

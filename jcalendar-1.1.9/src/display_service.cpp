@@ -6,6 +6,7 @@
 
 #include "GxEPD2_display_selection_new_style.h"
 #include "app_config.h"
+#include "app_state.h"
 
 namespace {
 
@@ -19,6 +20,29 @@ constexpr uint16_t kBlack = GxEPD_BLACK;
 constexpr uint16_t kRed = GxEPD_RED;
 constexpr int kBatteryVoltageMaxMv = 4200;
 constexpr int kBatteryVoltageMinMv = 3300;
+
+struct Rect {
+    int16_t x;
+    int16_t y;
+    int16_t w;
+    int16_t h;
+};
+
+struct DirtyRectList {
+    Rect items[app::kMaxFastRefreshRects];
+    uint8_t count = 0;
+    uint32_t area = 0;
+};
+
+constexpr Rect kSummaryRegion = {8, 8, 384, 80};
+constexpr Rect kGlmCardRegion = {8, 93, 188, 71};
+constexpr Rect kGptCardRegion = {204, 93, 188, 71};
+constexpr Rect kModelRowRegions[4] = {
+    {8, 188, 384, 20},
+    {8, 208, 384, 20},
+    {8, 228, 384, 20},
+    {8, 248, 384, 20},
+};
 
 #define FONT_LABEL u8g2_font_helvB10_tf
 #define FONT_VALUE u8g2_font_helvB14_tf
@@ -78,7 +102,7 @@ uint8_t read_battery_percent() {
         digitalWrite(app::kBatterySenseEnablePin, LOW);
     }
 
-    int voltage_mv = static_cast<int>((adc_sum / 10.0f) * app::kBatteryVoltageScalingFactor * 10.0f);
+    int voltage_mv = static_cast<int>((adc_sum / 10.0f) * app::kBatteryVoltageScalingFactor / 100.0f);
     if (voltage_mv >= kBatteryVoltageMaxMv) {
         return 100;
     }
@@ -90,7 +114,7 @@ uint8_t read_battery_percent() {
     );
 }
 
-void draw_overview(const DashboardDataV1& data) {
+void draw_overview(const DashboardDataV1& data, uint8_t battery_pct) {
     char total[16], input_s[16], output_s[16], cache_s[16];
     format_tokens(total, data.total_tokens);
     format_tokens(input_s, data.input_tokens);
@@ -102,9 +126,11 @@ void draw_overview(const DashboardDataV1& data) {
     display.drawLine(232, 16, 232, 80, kBlack);
     display.drawLine(312, 16, 312, 80, kBlack);
 
-    int16_t tw = text_width("TOTAL", FONT_LABEL);
-    draw_text(8 + (144 - tw) / 2, 30, "TOTAL", FONT_LABEL, kBlack);
-    tw = text_width("INPUT", FONT_LABEL);
+    char battery_text[16];
+    snprintf(battery_text, sizeof(battery_text), "BAT:%u%%", battery_pct);
+    draw_text(18, 30, "TOTAL", FONT_LABEL, kBlack);
+    draw_text(18 + text_width("TOTAL", FONT_LABEL) + 10, 30, battery_text, FONT_SMALL, kBlack);
+    int16_t tw = text_width("INPUT", FONT_LABEL);
     draw_text(152 + (80 - tw) / 2, 30, "INPUT", FONT_LABEL, kBlack);
     tw = text_width("OUTPUT", FONT_LABEL);
     draw_text(232 + (80 - tw) / 2, 30, "OUTPUT", FONT_LABEL, kBlack);
@@ -219,25 +245,91 @@ void draw_footer(const DashboardDataV1& data) {
     char footer[32];
     snprintf(footer, sizeof(footer), "LAST: %s", data.last_refresh);
     draw_text(12, 292, footer, FONT_SMALL, kBlack);
-
-    uint8_t battery_pct = read_battery_percent();
-    char battery_text[16];
-    snprintf(battery_text, sizeof(battery_text), "BAT:%u%%", battery_pct);
-    int16_t battery_width = text_width(battery_text, FONT_SMALL);
-    draw_text(392 - battery_width - 8, 292, battery_text, FONT_SMALL, kBlack);
 }
 
-void draw_dashboard_page(const DashboardDataV1& data) {
+void draw_dashboard_page(const DashboardDataV1& data, uint8_t battery_pct) {
     display.fillScreen(kWhite);
-    draw_overview(data);
+    draw_overview(data, battery_pct);
     draw_plan_cards(data);
     draw_model_table(data);
     draw_footer(data);
 }
 
-void finish_refresh() {
+bool add_dirty_rect(DirtyRectList& list, Rect rect) {
+    int16_t x2 = rect.x + rect.w;
+    rect.x = (rect.x / 8) * 8;
+    x2 = ((x2 + 7) / 8) * 8;
+    rect.w = x2 - rect.x;
+    if (rect.w <= 0 || rect.h <= 0 || list.count >= app::kMaxFastRefreshRects) {
+        return false;
+    }
+    list.items[list.count++] = rect;
+    list.area += static_cast<uint32_t>(rect.w) * static_cast<uint32_t>(rect.h);
+    return list.area <= app::kMaxFastRefreshArea;
+}
+
+bool battery_changed(uint8_t current, uint8_t previous) {
+    uint8_t delta = current > previous ? current - previous : previous - current;
+    return delta >= app::kFastRefreshBatteryThresholdPercent;
+}
+
+bool model_row_equal(const DashboardDataV1& current, const DashboardDataV1& previous, uint8_t index) {
+    return strncmp(current.models[index].model, previous.models[index].model, sizeof(current.models[index].model)) == 0 &&
+        current.models[index].provider_code == previous.models[index].provider_code &&
+        current.models[index].calls == previous.models[index].calls &&
+        current.models[index].total_tokens == previous.models[index].total_tokens &&
+        current.models[index].share_bp == previous.models[index].share_bp;
+}
+
+bool compute_dirty_rects(const DashboardDataV1& current, const DashboardRenderState& state, uint8_t battery_percent, DirtyRectList& rects) {
+    const DashboardDataV1& previous = state.last_data;
+
+    if (current.total_tokens != previous.total_tokens ||
+        current.input_tokens != previous.input_tokens ||
+        current.output_tokens != previous.output_tokens ||
+        current.cache_tokens != previous.cache_tokens ||
+        battery_changed(battery_percent, state.last_battery_percent)) {
+        if (!add_dirty_rect(rects, kSummaryRegion)) return false;
+    }
+
+    if (strncmp(current.glm_level, previous.glm_level, sizeof(current.glm_level)) != 0 ||
+        current.glm_5h_percent != previous.glm_5h_percent ||
+        current.glm_week_percent != previous.glm_week_percent ||
+        strncmp(current.glm_5h_label, previous.glm_5h_label, sizeof(current.glm_5h_label)) != 0 ||
+        strncmp(current.glm_week_label, previous.glm_week_label, sizeof(current.glm_week_label)) != 0) {
+        if (!add_dirty_rect(rects, kGlmCardRegion)) return false;
+    }
+
+    if (current.gpt_5h_percent != previous.gpt_5h_percent ||
+        current.gpt_week_percent != previous.gpt_week_percent ||
+        strncmp(current.gpt_5h_label, previous.gpt_5h_label, sizeof(current.gpt_5h_label)) != 0 ||
+        strncmp(current.gpt_week_label, previous.gpt_week_label, sizeof(current.gpt_week_label)) != 0) {
+        if (!add_dirty_rect(rects, kGptCardRegion)) return false;
+    }
+
+    if (current.row_count != previous.row_count) {
+        return false;
+    }
+    for (uint8_t i = 0; i < current.row_count && i < 4; i++) {
+        if (!model_row_equal(current, previous, i)) {
+            if (!add_dirty_rect(rects, kModelRowRegions[i])) return false;
+        }
+    }
+
+    return true;
+}
+
+void commit_render_state(const DashboardDataV1& data, uint8_t battery_percent, bool full_refresh) {
+    g_dashboardRenderState.last_data = data;
+    g_dashboardRenderState.last_battery_percent = battery_percent;
+    g_dashboardRenderState.partial_baseline_ready = true;
+    g_dashboardRenderState.fast_refresh_count = full_refresh ? 0 :
+        static_cast<uint8_t>(g_dashboardRenderState.fast_refresh_count + 1);
+}
+
+void finish_refresh(bool deep_sleep = true) {
     display.powerOff();
-    display.hibernate();
+    if (deep_sleep) display.hibernate();
 }
 
 }  // namespace
@@ -265,13 +357,49 @@ bool render_bitplane_image(const uint8_t* black_plane, const uint8_t* red_plane)
     return true;
 }
 
-bool render_dashboard(const DashboardDataV1& data) {
-    // 这里保持原厂驱动的整屏刷新路径，只替换上层看板绘制内容。
+bool render_dashboard_full(const DashboardDataV1& data) {
+    uint8_t battery_pct = read_battery_percent();
     display.setFullWindow();
     display.firstPage();
     do {
-        draw_dashboard_page(data);
-    } while (display.nextPage());
-    finish_refresh();
+        draw_dashboard_page(data, battery_pct);
+    } while (display.nextPageBW());
+    finish_refresh(false);
+    commit_render_state(data, battery_pct, true);
     return true;
+}
+
+bool render_dashboard_fast(const DashboardDataV1& data) {
+#if defined(SI_DRIVER) && (SI_DRIVER == 21)
+    if (!g_dashboardRenderState.partial_baseline_ready) {
+        return false;
+    }
+    if (g_dashboardRenderState.fast_refresh_count >= app::kFastRefreshMaintenanceInterval) {
+        return false;
+    }
+
+    uint8_t battery_pct = read_battery_percent();
+    DirtyRectList rects;
+    if (!compute_dirty_rects(data, g_dashboardRenderState, battery_pct, rects)) {
+        return false;
+    }
+    if (rects.count == 0) {
+        commit_render_state(data, battery_pct, false);
+        return true;
+    }
+
+    for (uint8_t i = 0; i < rects.count; i++) {
+        display.setPartialWindow(rects.items[i].x, rects.items[i].y, rects.items[i].w, rects.items[i].h);
+        display.firstPage();
+        do {
+            draw_dashboard_page(data, battery_pct);
+        } while (display.nextPageBW());
+    }
+    finish_refresh(false);
+    commit_render_state(data, battery_pct, false);
+    return true;
+#else
+    (void)data;
+    return false;
+#endif
 }
