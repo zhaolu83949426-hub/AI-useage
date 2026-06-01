@@ -263,6 +263,7 @@ void process_deferred_job() {
     bool parsed = dashboard_parse_v1(g_dashboardContext.payload_buffer, g_dashboardContext.received_bytes, &dashboard_data);
     bool ok = false;
     if (parsed) {
+        notify_dashboard_data(dashboard_data);
         if (g_requestedRefreshMode == app::kRefreshModeFast) {
             ok = render_dashboard_fast(dashboard_data);
             if (!ok) {
@@ -275,4 +276,7 @@ void process_deferred_job() {
     dashboard_reset(g_dashboardContext);
     g_deferredJob = DeferredJob::None;
     queue_simple_response(0x00, ok ? 0x7B : 0x7C);
+    if (ok) {
+        mark_sleep_after_render();
+    }
 }

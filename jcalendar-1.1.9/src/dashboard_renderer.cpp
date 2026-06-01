@@ -56,5 +56,12 @@ bool dashboard_parse_v1(const uint8_t* payload, uint32_t len, DashboardDataV1* d
         data->models[i].share_bp = payload[offset] | (payload[offset + 1] << 8);
         offset += 2;
     }
+
+    // 时间同步数据 (bytes 189-191)
+    if (offset + 3 <= len) {
+        data->sync_hour = payload[offset++];
+        data->sync_minute = payload[offset++];
+        data->sync_flags = payload[offset++];
+    }
     return true;
 }

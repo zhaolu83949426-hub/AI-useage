@@ -26,6 +26,9 @@ typedef struct {
         uint32_t total_tokens;
         uint16_t share_bp;
     } models[4];
+    uint8_t sync_hour;
+    uint8_t sync_minute;
+    uint8_t sync_flags;
 } DashboardDataV1;
 
 bool dashboard_parse_v1(const uint8_t* payload, uint32_t len, DashboardDataV1* data);

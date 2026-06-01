@@ -45,4 +45,11 @@ constexpr uint32_t kMaxFastRefreshArea = kDisplayWidth * 120;
 
 constexpr uint32_t kDeferredRenderDelayMs = 80;
 
+// 时间同步省电模式
+constexpr uint32_t kWakeWindowSec = 30;
+constexpr uint32_t kWakeIntervalMin = 5;
+constexpr uint8_t kNightStartHour = 0;
+constexpr uint8_t kNightEndHour = 8;
+constexpr uint16_t kBatteryThresholdMv = 4200;
+
 }  // namespace app
