@@ -354,7 +354,11 @@ void GxEPD2_420c_Z21::refresh_bw(int16_t x, int16_t y, int16_t w, int16_t h)
   w1 += x1 % 8;
   if (w1 % 8 > 0) w1 += 8 - w1 % 8;
   x1 -= x1 % 8;
-  _Init_BWFast();
+  if (!_bw_fast_initialized) {
+    _Init_BWFast();
+  } else {
+    _PowerOn();
+  }
   if (usePartialUpdateWindow) _writeCommand(0x91); // partial in
   _setPartialRamArea(x1, y1, w1, h1);
   _Update_BWFast();
@@ -459,12 +463,14 @@ void GxEPD2_420c_Z21::_InitDisplay_BWFast()
 
 void GxEPD2_420c_Z21::_Init_Full()
 {
+  _bw_fast_initialized = false;
   _InitDisplay();
   _PowerOn();
 }
 
 void GxEPD2_420c_Z21::_Init_Part()
 {
+  _bw_fast_initialized = false;
   _InitDisplay();
   _writeCommand(0x50); // VCOM AND DATA INTERVAL SETTING
   _writeData(0xf7);    // border floating
@@ -488,6 +494,7 @@ void GxEPD2_420c_Z21::_Init_BWFast()
   _writeData(0x37);
   _PowerOn();
   _using_partial_mode = true;
+  _bw_fast_initialized = true;
 }
 
 void GxEPD2_420c_Z21::_Update_Full()

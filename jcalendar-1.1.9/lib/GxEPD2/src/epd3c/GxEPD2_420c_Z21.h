@@ -85,6 +85,7 @@ class GxEPD2_420c_Z21 : public GxEPD2_EPD
     void _Update_Full();
     void _Update_Part();
     void _Update_BWFast();
+    bool _bw_fast_initialized = false;
     static const unsigned char lut_20_vcom0_partial[];
     static const unsigned char lut_21_ww_partial[];
     static const unsigned char lut_22_bw_partial[];

@@ -50,8 +50,17 @@ class BLETransport:
 
         self.client = bleak.BleakClient(device, timeout=15.0)
         await self.client.connect()
-        await self.client.start_notify(BLE_CHAR_UUID, self._on_notification)
-        logger.info(f"Connected to {device.name}")
+        for attempt in range(3):
+            try:
+                await self.client.start_notify(BLE_CHAR_UUID, self._on_notification)
+                logger.info(f"Connected to {device.name}")
+                return
+            except bleak.exc.BleakCharacteristicNotFoundError:
+                if attempt < 2:
+                    logger.warning(f"Characteristic not found, retrying ({attempt+1}/3)...")
+                    await asyncio.sleep(2)
+                    continue
+                raise
 
     async def disconnect(self) -> None:
         """Disconnect from the device."""

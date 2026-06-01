@@ -379,22 +379,11 @@ bool render_dashboard_fast(const DashboardDataV1& data) {
     }
 
     uint8_t battery_pct = read_battery_percent();
-    DirtyRectList rects;
-    if (!compute_dirty_rects(data, g_dashboardRenderState, battery_pct, rects)) {
-        return false;
-    }
-    if (rects.count == 0) {
-        commit_render_state(data, battery_pct, false);
-        return true;
-    }
-
-    for (uint8_t i = 0; i < rects.count; i++) {
-        display.setPartialWindow(rects.items[i].x, rects.items[i].y, rects.items[i].w, rects.items[i].h);
-        display.firstPage();
-        do {
-            draw_dashboard_page(data, battery_pct);
-        } while (display.nextPageBW());
-    }
+    display.setPartialWindow(0, 0, app::kDisplayWidth, app::kDisplayHeight);
+    display.firstPage();
+    do {
+        draw_dashboard_page(data, battery_pct);
+    } while (display.nextPageBW());
     finish_refresh(false);
     commit_render_state(data, battery_pct, false);
     return true;
