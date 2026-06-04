@@ -31,12 +31,9 @@ def _build_dashboard_snapshot(
     glm_plan,
     gpt_plan,
     device_status: DeviceStatus | None,
-    last_refresh: str,
+    captured_at: datetime,
 ) -> DashboardSnapshot:
     """Build unified DashboardSnapshot from collected data."""
-    now = datetime.now()
-    generated_at = now.isoformat()
-
     # Convert ModelUsage to snapshot format (add share_percent if missing)
     models = []
     total_tokens = usage.total_tokens or 1
@@ -53,8 +50,8 @@ def _build_dashboard_snapshot(
         ))
 
     return DashboardSnapshot(
-        generated_at=generated_at,
-        last_refresh_label=last_refresh,
+        generated_at=captured_at.isoformat(),
+        last_refresh_label=captured_at.strftime("%H:%M"),
         total_tokens=usage.total_tokens,
         input_tokens=usage.input_tokens,
         output_tokens=usage.output_tokens,
@@ -63,6 +60,9 @@ def _build_dashboard_snapshot(
         gpt_plan=gpt_plan,
         models=models,
         device=device_status,
+        sync_hour=captured_at.hour,
+        sync_minute=captured_at.minute,
+        sync_second=captured_at.second,
     )
 
 
@@ -193,44 +193,47 @@ def _select_refresh_mode(device_status: DeviceStatus) -> str:
     return "FAST"
 
 
-async def run_cycle(transport: BLETransport) -> None:
-    """Execute one complete collect-render-send cycle with cache check."""
-    # 1. Collect data
+def _collect_cycle_inputs():
+    """收集本轮看板所需的数据。"""
     logger.info("Collecting data...")
     usage = collect_today_usage()
     glm_plan = collect_glm_plan()
     gpt_plan = collect_gpt_plan()
+    return usage, glm_plan, gpt_plan
 
-    # 2. Check plan availability (required by design doc)
+
+async def _read_device_status_for_cycle(transport: BLETransport) -> DeviceStatus:
+    """先占住 BLE 唤醒窗口，再读取设备状态。"""
+    logger.info("Connecting to device...")
+    await transport.connect()
+    device_status = await transport.read_device_status()
+    logger.info(
+        f"Device: WiFi={'connected' if device_status.wifi_connected else 'disconnected'}, "
+        f"battery={device_status.battery_percent}%"
+    )
+    return device_status
+
+
+async def run_cycle(transport: BLETransport) -> None:
+    """Execute one complete collect-render-send cycle with cache check."""
+    device_status = None
+    refresh_mode = "FAST"
+
+    if TOKEN_DASHBOARD_RENDER_MODE in ("bitmap", "firmware_render"):
+        device_status = await _read_device_status_for_cycle(transport)
+
+    usage, glm_plan, gpt_plan = _collect_cycle_inputs()
+
     if not glm_plan.available and not gpt_plan.available:
         logger.warning("Both plans unavailable, skipping this cycle")
         return
 
-    # 3. Connect to device and read status
-    device_status = None
-    refresh_mode = "FAST"
-    if TOKEN_DASHBOARD_RENDER_MODE == "bitmap":
-        logger.info("Connecting to device...")
-        await transport.connect()
-        device_status = await transport.read_device_status()
-        logger.info(f"Device: WiFi={'connected' if device_status.wifi_connected else 'disconnected'}, "
-                    f"battery={device_status.battery_percent}%")
-    elif TOKEN_DASHBOARD_RENDER_MODE == "firmware_render":
-        logger.info("Connecting to device...")
-        await transport.connect()
-        device_status = await transport.read_device_status()
-        logger.info(f"Device: WiFi={'connected' if device_status.wifi_connected else 'disconnected'}, "
-                    f"battery={device_status.battery_percent}%")
-
-    # 4. Build unified snapshot
-    now = datetime.now()
     if TOKEN_DASHBOARD_RENDER_MODE == "firmware_render" and device_status:
         refresh_mode = _select_refresh_mode(device_status)
         logger.info(f"Selected refresh mode: {refresh_mode}")
-    last_refresh = now.strftime("%H:%M")
-    snapshot = _build_dashboard_snapshot(usage, glm_plan, gpt_plan, device_status, last_refresh)
 
-    # 5. Cache check: compare with last cycle
+    snapshot = _build_dashboard_snapshot(usage, glm_plan, gpt_plan, device_status, datetime.now())
+
     cache_dict = _snapshot_to_cache_dict(snapshot)
     cache_hash = _compute_cache_hash(cache_dict)
     last_cache = _load_last_cache()
@@ -242,7 +245,9 @@ async def run_cycle(transport: BLETransport) -> None:
     logger.info("Data changed since last cycle, proceeding with update")
     _save_cache(cache_dict, cache_hash)
 
-    # 6. Send based on render mode
+    # 真正发送前重新取一次时间，保证屏幕时间和 RTC 同步时间尽量贴近设备接收时刻。
+    snapshot = _build_dashboard_snapshot(usage, glm_plan, gpt_plan, device_status, datetime.now())
+
     if TOKEN_DASHBOARD_RENDER_MODE == "bitmap":
         success = await _run_bitmap_mode(transport, snapshot)
     elif TOKEN_DASHBOARD_RENDER_MODE == "firmware_render":
@@ -255,21 +260,21 @@ async def run_cycle(transport: BLETransport) -> None:
 
 
 def calculate_next_aligned_time():
-    """Calculate next 5-minute mark + 5 second delay and wait seconds."""
+    """Calculate next 5-minute mark and wait seconds."""
     now = datetime.now()
     next_5_min = ((now.minute // 5) + 1) * 5
     if next_5_min >= 60:
-        target = now.replace(hour=now.hour + 1, minute=0, second=5, microsecond=0)
+        target = now.replace(hour=now.hour + 1, minute=0, second=0, microsecond=0)
     else:
-        target = now.replace(minute=next_5_min, second=5, microsecond=0)
+        target = now.replace(minute=next_5_min, second=0, microsecond=0)
     wait_seconds = (target - now).total_seconds()
     return target, wait_seconds
 
 
 async def main_loop() -> None:
-    """Main event loop with 5-minute refresh aligned to marks + 5s delay."""
+    """Main event loop with 5-minute refresh aligned to marks."""
     logger.info("Token 用量看板 started")
-    logger.info("Refresh aligned to 5-minute marks + 5s delay")
+    logger.info("Refresh aligned to 5-minute marks")
 
     transport = BLETransport()
 
@@ -282,7 +287,7 @@ async def main_loop() -> None:
         if transport.client and transport.client.is_connected:
             await transport.disconnect()
 
-    # Subsequent cycles: align to 5-minute marks + 5s delay
+    # Subsequent cycles: align to 5-minute marks
     while True:
         next_time, wait_seconds = calculate_next_aligned_time()
         logger.info(f"Next update at {next_time.strftime('%H:%M:%S')} (waiting {wait_seconds:.1f}s)")

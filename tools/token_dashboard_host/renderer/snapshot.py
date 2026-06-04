@@ -74,4 +74,4 @@ class DashboardSnapshot:
     # Time sync data (for firmware wake scheduling)
     sync_hour: int = 0
     sync_minute: int = 0
-    sync_flags: int = 0
+    sync_second: int = 0

@@ -16,26 +16,18 @@
  */
 #include "battery.h"
 
-#include "driver/adc.h"
-#include "esp_adc_cal.h"
 #include <Arduino.h>
+#include "app_config.h"
 
 /**
- * 获取电池电压（mV）
+ * 获取电池电压（mV），使用 analogReadMilliVolts 内置 eFuse 校准
+ * 通过 2:1 分压电阻采样，结果乘 2 还原真实电池电压
  */
 int readBatteryVoltage() {
-    static const adc1_channel_t channel = ADC1_CHANNEL_4;  // GPIO32
-    adc1_config_width(ADC_WIDTH_BIT_12);
-    adc1_config_channel_atten(channel, ADC_ATTEN_11db);
-    adc_power_acquire();
-    delay(10);
-    int adc_val = adc1_get_raw(channel);
-    adc_power_release();
-
-    esp_adc_cal_characteristics_t adc_chars;
-    esp_adc_cal_value_t val_type = esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_11db, ADC_WIDTH_BIT_12, 1100, &adc_chars);
-    int voltage = esp_adc_cal_raw_to_voltage(adc_val, &adc_chars);
-    voltage *= 2;
-
-    return voltage;
+    uint32_t sum = 0;
+    for (int i = 0; i < 10; i++) {
+        sum += analogReadMilliVolts(app::kBatterySensePin);
+        delay(2);
+    }
+    return static_cast<int>((sum / 10.0f) * 2);
 }

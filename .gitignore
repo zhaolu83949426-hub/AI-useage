@@ -103,3 +103,5 @@ test_dashboard.png
 ### IDE
 .idea/
 .glm_token
+kindle/
+tools/.dashboard_cache.json

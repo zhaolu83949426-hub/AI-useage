@@ -61,7 +61,7 @@ bool dashboard_parse_v1(const uint8_t* payload, uint32_t len, DashboardDataV1* d
     if (offset + 3 <= len) {
         data->sync_hour = payload[offset++];
         data->sync_minute = payload[offset++];
-        data->sync_flags = payload[offset++];
+        data->sync_second = payload[offset++];
     }
     return true;
 }

@@ -1,0 +1,9 @@
+[13:25:14] RTC synced from dashboard: 13:25
+[13:25:14] _PowerOn : 47996
+[13:25:15] _Update_BWFast : 1052000
+[13:25:15] _PowerOff : 39996
+[13:30:12] RTC synced from dashboard: 13:30
+[13:30:12] _PowerOn : 47996
+[13:30:13] _Update_BWFast : 1052000
+[13:30:14] _PowerOff : 39996
+--- END OF CAPTURE ---

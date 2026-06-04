@@ -28,7 +28,7 @@ typedef struct {
     } models[4];
     uint8_t sync_hour;
     uint8_t sync_minute;
-    uint8_t sync_flags;
+    uint8_t sync_second;
 } DashboardDataV1;
 
 bool dashboard_parse_v1(const uint8_t* payload, uint32_t len, DashboardDataV1* data);

@@ -274,7 +274,7 @@ cd jcalendar-1.1.9
 pio run -e z21
 
 # 烧录固件 (esptool)
-PYTHONIOENCODING=utf-8 "$HOME/.platformio/penv/Scripts/esptool.exe" \
+PYTHONIOENCODING=utf-8 "$HOME/.platformio/penv/Scripts/esptool.exe" /
   --chip esp32 --port COM4 --baud 115200 \
   --before default-reset --after hard-reset \
   write-flash -z --flash-mode dio --flash-freq 40m --flash-size detect \

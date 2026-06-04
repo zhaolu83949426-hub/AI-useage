@@ -7,6 +7,7 @@
 #include "GxEPD2_display_selection_new_style.h"
 #include "app_config.h"
 #include "app_state.h"
+#include "battery.h"
 
 namespace {
 
@@ -86,23 +87,7 @@ void format_percent(char* buffer, uint16_t basis_points) {
 }
 
 uint8_t read_battery_percent() {
-    pinMode(app::kBatterySensePin, INPUT);
-    if (app::kBatterySenseEnablePin != 0xFF) {
-        pinMode(app::kBatterySenseEnablePin, OUTPUT);
-        digitalWrite(app::kBatterySenseEnablePin, HIGH);
-    }
-
-    uint32_t adc_sum = 0;
-    for (int i = 0; i < 10; i++) {
-        adc_sum += analogRead(app::kBatterySensePin);
-        delay(2);
-    }
-
-    if (app::kBatterySenseEnablePin != 0xFF) {
-        digitalWrite(app::kBatterySenseEnablePin, LOW);
-    }
-
-    int voltage_mv = static_cast<int>((adc_sum / 10.0f) * app::kBatteryVoltageScalingFactor / 100.0f);
+    int voltage_mv = readBatteryVoltage();
     if (voltage_mv >= kBatteryVoltageMaxMv) {
         return 100;
     }

@@ -3,7 +3,6 @@
 import logging
 import struct
 import zlib
-from datetime import datetime
 
 from ..renderer.snapshot import DashboardSnapshot, ModelUsage
 
@@ -114,13 +113,11 @@ def encode_snapshot_v1(snapshot: DashboardSnapshot) -> bytes:
         offset += MODEL_ROW_SIZE
 
     # Time sync data (bytes 189-191)
-    from datetime import datetime
-    now = datetime.now()
-    buffer[offset] = now.hour       # sync_hour
+    buffer[offset] = snapshot.sync_hour
     offset += 1
-    buffer[offset] = now.minute     # sync_minute
+    buffer[offset] = snapshot.sync_minute
     offset += 1
-    buffer[offset] = 0              # sync_flags (reserved)
+    buffer[offset] = snapshot.sync_second
     offset += 1
 
     return bytes(buffer)

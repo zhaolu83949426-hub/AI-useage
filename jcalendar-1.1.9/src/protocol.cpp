@@ -263,6 +263,7 @@ void process_deferred_job() {
     bool parsed = dashboard_parse_v1(g_dashboardContext.payload_buffer, g_dashboardContext.received_bytes, &dashboard_data);
     bool ok = false;
     if (parsed) {
+        // 每次看板推送都用主机侧时间刷新 RTC，避免深睡多轮后时钟持续漂移。
         notify_dashboard_data(dashboard_data);
         if (g_requestedRefreshMode == app::kRefreshModeFast) {
             ok = render_dashboard_fast(dashboard_data);
