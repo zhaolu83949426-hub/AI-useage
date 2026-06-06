@@ -16,10 +16,20 @@ static bool g_timeSyncMode = false;
 static bool g_sleepAfterRender = false;
 // 唤醒窗口截止时间 (ms)
 static uint32_t g_wakeDeadlineMs = 0;
+// 单击按钮后保持唤醒，等待下一次数据推送成功后再恢复循环睡眠
+static bool g_waitNextPushAfterButton = false;
+static volatile bool g_buttonPressed = false;
+static uint32_t g_lastButtonPressMs = 0;
 // RTC 数据：深睡前标记是否处于时间同步模式（跨深睡眠保留）
 RTC_DATA_ATTR static bool g_rtcTimeSyncMode = false;
 // 上次 RTC 同步的时间戳（跨深睡眠保留）
 RTC_DATA_ATTR static time_t g_rtcLastSyncTime = 0;
+// 按钮唤醒后保留等待推送状态
+RTC_DATA_ATTR static bool g_rtcWaitNextPushAfterButton = false;
+
+static void IRAM_ATTR handle_button_interrupt() {
+    g_buttonPressed = true;
+}
 
 static bool is_battery_powered() {
     int voltage_mv = readBatteryVoltage();
@@ -46,7 +56,7 @@ static void sync_rtc_from_dashboard(const DashboardDataV1& data) {
                   data.sync_hour, data.sync_minute, data.sync_second);
 
     // 首次同步后激活时间同步省电模式
-    if (!g_timeSyncMode && is_battery_powered()) {
+    if (!g_timeSyncMode && !g_waitNextPushAfterButton && is_battery_powered()) {
         g_timeSyncMode = true;
         g_wakeDeadlineMs = millis() + app::kWakeWindowSec * 1000;
         g_sleepAfterRender = false;
@@ -101,71 +111,127 @@ static void enter_deep_sleep(uint32_t sleep_sec) {
     Serial.printf("Entering deep sleep for %lus\n", static_cast<unsigned long>(sleep_sec));
     Serial.flush();
     esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(sleep_sec) * 1000000ULL);
+    esp_sleep_enable_ext0_wakeup(KEY_M, 0);
     esp_deep_sleep_start();
+}
+
+static void activate_button_wait_mode(const char* reason) {
+    g_timeSyncMode = false;
+    g_sleepAfterRender = false;
+    g_wakeDeadlineMs = 0;
+    g_waitNextPushAfterButton = true;
+    g_rtcWaitNextPushAfterButton = true;
+    g_rtcTimeSyncMode = false;
+    Serial.printf("Button wait mode activated: %s\n", reason);
+}
+
+static void setup_button() {
+    pinMode(KEY_M, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(KEY_M), handle_button_interrupt, FALLING);
+}
+
+static void process_button_press() {
+    if (!g_buttonPressed) {
+        return;
+    }
+    g_buttonPressed = false;
+
+    uint32_t now_ms = millis();
+    if (now_ms - g_lastButtonPressMs < app::kButtonDebounceMs) {
+        return;
+    }
+    g_lastButtonPressMs = now_ms;
+    activate_button_wait_mode("single click");
+}
+
+static bool should_continue_night_sleep(bool timer_wakeup) {
+    if (!timer_wakeup || !g_rtcTimeSyncMode || g_rtcWaitNextPushAfterButton) {
+        return false;
+    }
+
+    time_t now = time(nullptr);
+    struct tm tm_info = {};
+    localtime_r(&now, &tm_info);
+    return tm_info.tm_hour >= app::kNightStartHour && tm_info.tm_hour < app::kNightEndHour;
+}
+
+static void configure_power_saving_mode() {
+    g_timeSyncMode = !g_waitNextPushAfterButton && is_battery_powered();
+    if (!g_timeSyncMode) {
+        return;
+    }
+
+    time_t now = time(nullptr);
+    struct tm tm_info = {};
+    localtime_r(&now, &tm_info);
+
+    // RTC 未初始化或同步过期时保持唤醒，等待主机推送重新校时。
+    bool rtc_valid = (tm_info.tm_year >= (2024 - 1900));
+    bool sync_recent = (g_rtcLastSyncTime > 0 && (now - g_rtcLastSyncTime) <= (3 * 86400));
+    if (rtc_valid && sync_recent) {
+        return;
+    }
+
+    g_timeSyncMode = false;
+    Serial.printf("RTC not ready (valid=%d, sync_age=%lus), staying awake for time sync\n",
+                  rtc_valid,
+                  g_rtcLastSyncTime > 0 ? static_cast<unsigned long>(now - g_rtcLastSyncTime) : 0);
+}
+
+static bool enter_night_sleep_if_needed() {
+    if (!g_timeSyncMode) {
+        return false;
+    }
+
+    Serial.println("Time sync mode enabled (battery power saving)");
+    time_t now = time(nullptr);
+    struct tm tm_info = {};
+    localtime_r(&now, &tm_info);
+
+    if (tm_info.tm_hour < app::kNightStartHour || tm_info.tm_hour >= app::kNightEndHour) {
+        g_wakeDeadlineMs = millis() + app::kWakeWindowSec * 1000;
+        g_sleepAfterRender = false;
+        return false;
+    }
+
+    Serial.println("Night mode: sleeping until morning");
+    g_rtcTimeSyncMode = true;
+    uint32_t sleep_sec = seconds_to_next_wake();
+    enter_deep_sleep(sleep_sec);
+    return true;
 }
 
 void setup() {
     Serial.begin(115200);
     delay(100);
 
-    bool timer_wakeup = (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER);
+    esp_sleep_wakeup_cause_t wakeup_cause = esp_sleep_get_wakeup_cause();
+    bool timer_wakeup = (wakeup_cause == ESP_SLEEP_WAKEUP_TIMER);
+    bool button_wakeup = (wakeup_cause == ESP_SLEEP_WAKEUP_EXT0);
 
     // 定时唤醒 + 之前处于时间同步模式 + 仍在夜间 → 跳过完整初始化直接回睡
-    if (timer_wakeup && g_rtcTimeSyncMode) {
-        time_t now = time(nullptr);
-        struct tm tm_info = {};
-        localtime_r(&now, &tm_info);
-        if (tm_info.tm_hour >= app::kNightStartHour && tm_info.tm_hour < app::kNightEndHour) {
-            Serial.println("Night mode: continuing sleep (fast path)");
-            uint32_t sleep_sec = seconds_to_next_wake();
-            enter_deep_sleep(sleep_sec);
-            return;
-        }
+    if (should_continue_night_sleep(timer_wakeup)) {
+        Serial.println("Night mode: continuing sleep (fast path)");
+        uint32_t sleep_sec = seconds_to_next_wake();
+        enter_deep_sleep(sleep_sec);
+        return;
     }
 
     SPI.begin(SPI_SCK, -1, SPI_MOSI, SPI_CS);
+    setup_button();
     init_protocol_state();
     init_ble_service();
     init_display_service();
 
-    // 电池供电时启用时间同步省电模式
-    g_timeSyncMode = is_battery_powered();
-
-    if (g_timeSyncMode) {
-        time_t now = time(nullptr);
-        struct tm tm_info = {};
-        localtime_r(&now, &tm_info);
-
-        // RTC 未初始化（年份 < 2024）或超过 3 天未同步 → 不进入省电模式，保持唤醒等待推送
-        bool rtc_valid = (tm_info.tm_year >= (2024 - 1900));
-        bool sync_recent = (g_rtcLastSyncTime > 0 && (now - g_rtcLastSyncTime) <= (3 * 86400));
-        if (!rtc_valid || !sync_recent) {
-            g_timeSyncMode = false;
-            Serial.printf("RTC not ready (valid=%d, sync_age=%lus), staying awake for time sync\n",
-                           rtc_valid,
-                           g_rtcLastSyncTime > 0 ? static_cast<unsigned long>(now - g_rtcLastSyncTime) : 0);
-        }
+    g_waitNextPushAfterButton = g_rtcWaitNextPushAfterButton;
+    if (button_wakeup) {
+        activate_button_wait_mode("wakeup");
     }
 
-    if (g_timeSyncMode) {
-        Serial.println("Time sync mode enabled (battery power saving)");
-
-        time_t now = time(nullptr);
-        struct tm tm_info = {};
-        localtime_r(&now, &tm_info);
-
-        // 夜间模式：初始化后直接深度睡眠到早上
-        if (tm_info.tm_hour >= app::kNightStartHour && tm_info.tm_hour < app::kNightEndHour) {
-            Serial.println("Night mode: sleeping until morning");
-            g_rtcTimeSyncMode = true;
-            uint32_t sleep_sec = seconds_to_next_wake();
-            enter_deep_sleep(sleep_sec);
-            return;
-        }
-
-        // 设置唤醒窗口截止时间
-        g_wakeDeadlineMs = millis() + app::kWakeWindowSec * 1000;
-        g_sleepAfterRender = false;
+    // 电池供电时启用时间同步省电模式
+    configure_power_saving_mode();
+    if (enter_night_sleep_if_needed()) {
+        return;
     }
     g_rtcTimeSyncMode = g_timeSyncMode;
 }
@@ -179,6 +245,7 @@ static void process_one_command() {
 }
 
 void loop() {
+    process_button_press();
     process_one_command();
     process_ble_responses();
     process_deferred_job();
@@ -187,7 +254,8 @@ void loop() {
 
     // 时间同步模式：渲染完成后进入深度睡眠
     if (g_timeSyncMode && g_sleepAfterRender) {
-        // 同步 RTC（从最近一次推送数据）
+        // 等待最终刷新通知送出，避免深睡过早切断 BLE notify。
+        delay(app::kBleNotifyDrainDelayMs);
         uint32_t sleep_sec = seconds_to_next_wake();
         enter_deep_sleep(sleep_sec);
         return;
@@ -206,6 +274,12 @@ void loop() {
 
 // 供 protocol.cpp 调用：渲染完成后标记睡眠
 void mark_sleep_after_render() {
+    if (g_waitNextPushAfterButton) {
+        g_waitNextPushAfterButton = false;
+        g_rtcWaitNextPushAfterButton = false;
+        g_timeSyncMode = is_battery_powered();
+        g_rtcTimeSyncMode = g_timeSyncMode;
+    }
     if (g_timeSyncMode) {
         g_sleepAfterRender = true;
     }
