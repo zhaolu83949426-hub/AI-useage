@@ -1,9 +1,9 @@
 {
   "version": "v2",
-  "total_tokens": 27788800,
-  "input_tokens": 7566590,
-  "output_tokens": 141345,
-  "cache_tokens": 19987520,
+  "total_tokens": 28320956,
+  "input_tokens": 8052139,
+  "output_tokens": 143169,
+  "cache_tokens": 20031296,
   "glm_plan": {
     "available": true,
     "five_hour_percent": 28,
@@ -23,21 +23,21 @@
       "model": "glm-5.1",
       "calls": 277,
       "total_tokens": 16036198,
-      "share_percent": 57.7
+      "share_percent": 56.6
     },
     {
       "model": "gpt-5.4",
       "calls": 102,
       "total_tokens": 10583566,
-      "share_percent": 38.1
+      "share_percent": 37.4
     },
     {
       "model": "gpt-5.5",
-      "calls": 17,
-      "total_tokens": 1169036,
-      "share_percent": 4.2
+      "calls": 23,
+      "total_tokens": 1701192,
+      "share_percent": 6
     }
   ],
-  "hash": "2871df3284f28e18a918c4171ce94aa0",
-  "timestamp": "2026-06-10T12:00:08.160584"
+  "hash": "f12aed2c0f38e58fab34a409765dcf52",
+  "timestamp": "2026-06-10T12:10:06.458507"
 }
