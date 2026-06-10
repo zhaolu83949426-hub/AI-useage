@@ -15,6 +15,8 @@ class ServerCallbacks : public NimBLEServerCallbacks {
         (void)server;
         (void)info;
         g_bleConnected = true;
+        g_wakeTimeoutCount = 0;
+        g_wakeCyclePaused = false;
         g_rebootFlag = false;
         refresh_msd_payload();
     }

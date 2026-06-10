@@ -43,6 +43,7 @@ class DeviceStatus:
     battery_percent: int = 0
     available: bool = False
     partial_baseline_ready: bool = False
+    force_full_refresh: bool = False
 
 
 @dataclass

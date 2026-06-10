@@ -5,12 +5,11 @@
 
 #include "app_config.h"
 #include "app_state.h"
-#include "battery.h"
 #include "ble_service.h"
 #include "display_service.h"
 #include "protocol.h"
 
-// 时间同步模式：电池供电时自动启用
+// 时间同步模式：RTC 就绪后按固定周期唤醒并等待主机推送
 static bool g_timeSyncMode = false;
 // 渲染完成后应进入深度睡眠
 static bool g_sleepAfterRender = false;
@@ -31,10 +30,46 @@ static void IRAM_ATTR handle_button_interrupt() {
     g_buttonPressed = true;
 }
 
-static bool is_battery_powered() {
-    int voltage_mv = readBatteryVoltage();
-    // 电池电压 < 4.2V 视为电池供电（非 USB 充电）
-    return voltage_mv < app::kBatteryThresholdMv;
+static void reset_wake_timeout_state() {
+    g_wakeTimeoutCount = 0;
+    g_wakeCyclePaused = false;
+}
+
+static bool has_active_push_session() {
+    return g_bleConnected ||
+        g_deferredJob != DeferredJob::None ||
+        g_directWriteState.active ||
+        !g_commandQueue.empty() ||
+        !g_responseQueue.empty();
+}
+
+static void enter_button_resume_sleep() {
+    Serial.println("Entering deep sleep until button wakeup");
+    Serial.flush();
+    esp_sleep_enable_ext0_wakeup(KEY_M, 0);
+    esp_deep_sleep_start();
+}
+
+static void resume_periodic_wake_cycle(const char* reason) {
+    reset_wake_timeout_state();
+    g_timeSyncMode = true;
+    g_sleepAfterRender = false;
+    g_wakeDeadlineMs = millis() + app::kWakeWindowSec * 1000;
+    g_waitNextPushAfterButton = false;
+    g_rtcWaitNextPushAfterButton = false;
+    g_rtcTimeSyncMode = true;
+    Serial.printf("Periodic wake cycle resumed: %s\n", reason);
+}
+
+static void pause_periodic_wake_cycle() {
+    g_timeSyncMode = false;
+    g_sleepAfterRender = false;
+    g_wakeDeadlineMs = 0;
+    g_waitNextPushAfterButton = false;
+    g_rtcWaitNextPushAfterButton = false;
+    g_rtcTimeSyncMode = false;
+    g_wakeCyclePaused = true;
+    g_wakeTimeoutCount = 0;
 }
 
 // 用推送数据中的 sync_hour/sync_minute/sync_second 同步本地 RTC
@@ -55,8 +90,8 @@ static void sync_rtc_from_dashboard(const DashboardDataV1& data) {
     Serial.printf("RTC synced from dashboard: %02d:%02d:%02d\n",
                   data.sync_hour, data.sync_minute, data.sync_second);
 
-    // 首次同步后激活时间同步省电模式
-    if (!g_timeSyncMode && !g_waitNextPushAfterButton && is_battery_powered()) {
+    // 首次同步后激活周期唤醒模式
+    if (!g_timeSyncMode && !g_waitNextPushAfterButton) {
         g_timeSyncMode = true;
         g_wakeDeadlineMs = millis() + app::kWakeWindowSec * 1000;
         g_sleepAfterRender = false;
@@ -122,6 +157,7 @@ static void activate_button_wait_mode(const char* reason) {
     g_waitNextPushAfterButton = true;
     g_rtcWaitNextPushAfterButton = true;
     g_rtcTimeSyncMode = false;
+    g_forceFullRefresh = true;
     Serial.printf("Button wait mode activated: %s\n", reason);
 }
 
@@ -141,6 +177,10 @@ static void process_button_press() {
         return;
     }
     g_lastButtonPressMs = now_ms;
+    if (g_wakeCyclePaused) {
+        resume_periodic_wake_cycle("button");
+        return;
+    }
     activate_button_wait_mode("single click");
 }
 
@@ -156,7 +196,12 @@ static bool should_continue_night_sleep(bool timer_wakeup) {
 }
 
 static void configure_power_saving_mode() {
-    g_timeSyncMode = !g_waitNextPushAfterButton && is_battery_powered();
+    if (g_wakeCyclePaused) {
+        g_timeSyncMode = false;
+        return;
+    }
+
+    g_timeSyncMode = !g_waitNextPushAfterButton;
     if (!g_timeSyncMode) {
         return;
     }
@@ -201,6 +246,27 @@ static bool enter_night_sleep_if_needed() {
     return true;
 }
 
+static void handle_wake_window_expired() {
+    // 一旦进入 BLE 会话或已开始渲染，就必须等本轮处理完成后再睡。
+    if (has_active_push_session()) {
+        return;
+    }
+
+    g_wakeTimeoutCount = static_cast<uint8_t>(g_wakeTimeoutCount + 1);
+    Serial.printf("Wake window expired without BLE session (%u/%u)\n",
+                  g_wakeTimeoutCount,
+                  app::kWakeTimeoutLimit);
+    if (g_wakeTimeoutCount >= app::kWakeTimeoutLimit) {
+        Serial.println("Wake retry limit reached, sleeping until button press");
+        pause_periodic_wake_cycle();
+        enter_button_resume_sleep();
+        return;
+    }
+
+    uint32_t sleep_sec = seconds_to_next_wake();
+    enter_deep_sleep(sleep_sec);
+}
+
 void setup() {
     Serial.begin(115200);
     delay(100);
@@ -221,14 +287,17 @@ void setup() {
     setup_button();
     init_protocol_state();
     init_ble_service();
-    init_display_service();
 
     g_waitNextPushAfterButton = g_rtcWaitNextPushAfterButton;
     if (button_wakeup) {
+        if (g_wakeCyclePaused) {
+            resume_periodic_wake_cycle("button wakeup");
+            return;
+        }
         activate_button_wait_mode("wakeup");
     }
 
-    // 电池供电时启用时间同步省电模式
+    // RTC 就绪时启用时间同步周期唤醒模式
     configure_power_saving_mode();
     if (enter_night_sleep_if_needed()) {
         return;
@@ -263,9 +332,7 @@ void loop() {
 
     // 时间同步模式：唤醒窗口超时，未收到数据也回睡眠
     if (g_timeSyncMode && g_wakeDeadlineMs > 0 && millis() > g_wakeDeadlineMs) {
-        Serial.println("Wake window expired, returning to sleep");
-        uint32_t sleep_sec = seconds_to_next_wake();
-        enter_deep_sleep(sleep_sec);
+        handle_wake_window_expired();
         return;
     }
 
@@ -274,18 +341,38 @@ void loop() {
 
 // 供 protocol.cpp 调用：渲染完成后标记睡眠
 void mark_sleep_after_render() {
+    reset_wake_timeout_state();
     if (g_waitNextPushAfterButton) {
         g_waitNextPushAfterButton = false;
         g_rtcWaitNextPushAfterButton = false;
-        g_timeSyncMode = is_battery_powered();
+        g_timeSyncMode = true;
         g_rtcTimeSyncMode = g_timeSyncMode;
     }
+    g_forceFullRefresh = false;
     if (g_timeSyncMode) {
+        g_sleepAfterRender = true;
+    }
+}
+
+// 供 protocol.cpp 调用：无数据变化时跳过刷屏并尽快回到深睡眠。
+void mark_sleep_without_render() {
+    if (g_timeSyncMode) {
+        reset_wake_timeout_state();
+        g_rtcTimeSyncMode = true;
         g_sleepAfterRender = true;
     }
 }
 
 // 供 protocol.cpp 调用：推送数据到达后同步 RTC
 void notify_dashboard_data(const DashboardDataV1& data) {
+    sync_rtc_from_dashboard(data);
+}
+
+// 供 protocol.cpp 调用：无变化命令只同步时间，不触发刷屏。
+void notify_dashboard_time(uint8_t hour, uint8_t minute, uint8_t second) {
+    DashboardDataV1 data = {};
+    data.sync_hour = hour;
+    data.sync_minute = minute;
+    data.sync_second = second;
     sync_rtc_from_dashboard(data);
 }

@@ -91,7 +91,7 @@ void handle_read_msd() {
     refresh_msd_payload();
     uint8_t response[19] = {0x00, 0x44};
     memcpy(response + 2, g_msdPayload, sizeof(g_msdPayload));
-    response[18] = 0;
+    response[18] = g_forceFullRefresh ? app::kMsdExtensionForceFullRefresh : 0;
     queue_bytes(response, sizeof(response));
 }
 
@@ -180,6 +180,14 @@ void handle_dashboard_commit(uint8_t refresh_mode) {
     }
 }
 
+void handle_no_change_sleep(const uint8_t* payload, uint16_t len) {
+    if (len >= 3) {
+        notify_dashboard_time(payload[0], payload[1], payload[2]);
+    }
+    queue_simple_response(0x00, static_cast<uint8_t>(CMD_DASHBOARD_NO_CHANGE_SLEEP & 0xFF));
+    mark_sleep_without_render();
+}
+
 }  // namespace
 
 void init_protocol_state() {
@@ -235,6 +243,7 @@ void process_command_packet(const uint8_t* data, uint16_t len) {
         case CMD_DASHBOARD_RENDER_COMMIT:
             handle_dashboard_commit(len > 2 ? data[2] : app::kRefreshModeFull);
             return;
+        case CMD_DASHBOARD_NO_CHANGE_SLEEP: handle_no_change_sleep(data + 2, len - 2); return;
         default: queue_error_response(static_cast<uint8_t>(command & 0xFF), 0x00); return;
     }
 }

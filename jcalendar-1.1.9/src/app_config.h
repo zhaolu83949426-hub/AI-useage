@@ -38,6 +38,7 @@ constexpr uint8_t kFirmwareMinor = 3;
 constexpr uint8_t kRefreshModeFull = 0;
 constexpr uint8_t kRefreshModeFast = 1;
 constexpr uint8_t kMsdFlagPartialBaselineReady = 1 << 3;
+constexpr uint8_t kMsdExtensionForceFullRefresh = 1 << 0;
 constexpr uint8_t kFastRefreshMaintenanceInterval = 12;
 constexpr uint8_t kFastRefreshBatteryThresholdPercent = 2;
 constexpr uint8_t kMaxFastRefreshRects = 4;
@@ -48,13 +49,13 @@ constexpr uint32_t kBleNotifyDrainDelayMs = 500;
 
 // 时间同步省电模式
 // 主机端 BLE 扫描和数据采集存在秒级抖动，适度放宽唤醒窗口避免错过广播。
-constexpr uint32_t kWakeWindowSec = 30;
+constexpr uint32_t kWakeWindowSec = 15;
 constexpr uint32_t kWakeIntervalMin = 5;
+constexpr uint8_t kWakeTimeoutLimit = 5;
 constexpr uint8_t kNightStartHour = 0;
 constexpr uint8_t kNightEndHour = 8;
 constexpr uint32_t kButtonDebounceMs = 50;
 // 单次最大深睡眠时长，限制 RTC 漂移累积（夜间分 1 小时一段睡）
 constexpr uint32_t kMaxDeepSleepSec = 3600;
-constexpr uint16_t kBatteryThresholdMv = 4200;
 
 }  // namespace app

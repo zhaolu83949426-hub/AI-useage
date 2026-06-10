@@ -28,8 +28,13 @@ if os.path.exists(_glm_token_file):
 else:
     GLM_API_TOKEN = os.getenv("TOKEN_DASHBOARD_GLM_API_TOKEN", "")
 
-# Refresh
-REFRESH_INTERVAL_SECONDS = 300  # 5 minutes
+# Host scheduling
+COLLECT_INTERVAL_SECONDS = 30
+DEVICE_WAKE_INTERVAL_SECONDS = 300
+POST_DEVICE_HANDLED_GUARD_SECONDS = 2
+
+# BLE scan
+BLE_SCAN_TIMEOUT_SECONDS = 5.0
 
 # Battery voltage -> percent mapping
 BATTERY_VOLTAGE_MAX = 4.20

@@ -1,15 +1,15 @@
 {
   "version": "v2",
-  "total_tokens": 68642645,
-  "input_tokens": 35863707,
-  "output_tokens": 345881,
-  "cache_tokens": 32241664,
+  "total_tokens": 27788800,
+  "input_tokens": 7566590,
+  "output_tokens": 141345,
+  "cache_tokens": 19987520,
   "glm_plan": {
     "available": true,
-    "five_hour_percent": 65,
-    "week_percent": 38,
-    "five_hour_label": "19:17",
-    "week_label": "6-10"
+    "five_hour_percent": 28,
+    "week_percent": 3,
+    "five_hour_label": "13:57",
+    "week_label": "6-17"
   },
   "gpt_plan": {
     "available": false,
@@ -20,18 +20,24 @@
   },
   "models": [
     {
-      "model": "gpt-5.5",
-      "calls": 356,
-      "total_tokens": 66367958,
-      "share_percent": 96.7
+      "model": "glm-5.1",
+      "calls": 277,
+      "total_tokens": 16036198,
+      "share_percent": 57.7
     },
     {
       "model": "gpt-5.4",
-      "calls": 12,
-      "total_tokens": 2274687,
-      "share_percent": 3.3
+      "calls": 102,
+      "total_tokens": 10583566,
+      "share_percent": 38.1
+    },
+    {
+      "model": "gpt-5.5",
+      "calls": 17,
+      "total_tokens": 1169036,
+      "share_percent": 4.2
     }
   ],
-  "hash": "f655fee5e0b089715d3d441ea9c65be4",
-  "timestamp": "2026-06-05T17:30:07.788299"
+  "hash": "2871df3284f28e18a918c4171ce94aa0",
+  "timestamp": "2026-06-10T12:00:08.160584"
 }

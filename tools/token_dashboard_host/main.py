@@ -6,9 +6,17 @@ import json
 import logging
 import os
 import sys
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
-from .config import REFRESH_INTERVAL_SECONDS, TOKEN_DASHBOARD_RENDER_MODE
+from .config import (
+    BLE_SCAN_TIMEOUT_SECONDS,
+    COLLECT_INTERVAL_SECONDS,
+    DEVICE_WAKE_INTERVAL_SECONDS,
+    POST_DEVICE_HANDLED_GUARD_SECONDS,
+    TOKEN_DASHBOARD_RENDER_MODE,
+)
 from .collectors.aiusage import collect_today_usage
 from .collectors.glm_plan import collect_glm_plan
 from .collectors.gpt_plan import collect_gpt_plan
@@ -16,7 +24,7 @@ from .renderer.dashboard import render_dashboard, DashboardData
 from .renderer.bitmap import rgb_to_bitplanes
 from .renderer.snapshot import DashboardSnapshot, DeviceStatus, ModelUsage
 from .renderer.firmware_render import encode_with_crc
-from .ble.transport import BLETransport
+from .ble.transport import BLEDeviceNotFoundError, BLETransport
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,6 +32,33 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger("dashboard")
+
+
+@dataclass(frozen=True)
+class CollectedSnapshot:
+    """主机侧预采集结果，BLE 连接窗口内直接复用。"""
+    usage: Any
+    glm_plan: Any
+    gpt_plan: Any
+    cache_dict: dict
+    cache_hash: str
+    collected_at: datetime
+
+
+class CollectionCache:
+    """保存后台采集到的最新看板数据。"""
+
+    def __init__(self):
+        self._latest: CollectedSnapshot | None = None
+        self._lock = asyncio.Lock()
+
+    async def get(self) -> CollectedSnapshot | None:
+        async with self._lock:
+            return self._latest
+
+    async def set(self, snapshot: CollectedSnapshot) -> None:
+        async with self._lock:
+            self._latest = snapshot
 
 
 def _build_dashboard_snapshot(
@@ -164,6 +199,15 @@ def _compute_cache_hash(cache_dict: dict) -> str:
     return hashlib.md5(cache_str.encode()).hexdigest()
 
 
+def _format_cache_summary(cache_dict: dict, cache_hash: str) -> str:
+    """生成缓存判定日志摘要，便于判断是否真的有数据变化。"""
+    return (
+        f"hash={cache_hash[:8]}, total={cache_dict['total_tokens']}, "
+        f"input={cache_dict['input_tokens']}, output={cache_dict['output_tokens']}, "
+        f"cache={cache_dict['cache_tokens']}, models={len(cache_dict['models'])}"
+    )
+
+
 def _load_last_cache() -> dict | None:
     """Load last cache from file."""
     if not os.path.exists(_CACHE_FILE):
@@ -178,75 +222,134 @@ def _load_last_cache() -> dict | None:
 def _save_cache(cache_dict: dict, cache_hash: str) -> None:
     """Save cache to file."""
     try:
-        cache_dict["hash"] = cache_hash
-        cache_dict["timestamp"] = datetime.now().isoformat()
+        cache_to_save = dict(cache_dict)
+        cache_to_save["hash"] = cache_hash
+        cache_to_save["timestamp"] = datetime.now().isoformat()
         with open(_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(cache_dict, f, ensure_ascii=False, indent=2)
+            json.dump(cache_to_save, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
 
 
 def _select_refresh_mode(device_status: DeviceStatus) -> str:
-    logger.info(f"MSD partial_baseline_ready={int(device_status.partial_baseline_ready)}")
-    if not device_status.partial_baseline_ready:
+    logger.info(
+        "MSD partial_baseline_ready=%d, force_full_refresh=%d",
+        int(device_status.partial_baseline_ready),
+        int(device_status.force_full_refresh),
+    )
+    if device_status.force_full_refresh or not device_status.partial_baseline_ready:
         return "FULL"
     return "FAST"
 
 
-def _collect_cycle_inputs():
+def _collect_snapshot() -> CollectedSnapshot | None:
     """收集本轮看板所需的数据。"""
     logger.info("Collecting data...")
     usage = collect_today_usage()
     glm_plan = collect_glm_plan()
     gpt_plan = collect_gpt_plan()
-    return usage, glm_plan, gpt_plan
+    if not glm_plan.available and not gpt_plan.available:
+        logger.warning("Both plans unavailable, keeping previous collection cache")
+        return None
+
+    captured_at = datetime.now()
+    snapshot = _build_dashboard_snapshot(usage, glm_plan, gpt_plan, None, captured_at)
+    cache_dict = _snapshot_to_cache_dict(snapshot)
+    cache_hash = _compute_cache_hash(cache_dict)
+    logger.info(
+        "Collection cache refreshed: "
+        f"{_format_cache_summary(cache_dict, cache_hash)}"
+    )
+    return CollectedSnapshot(
+        usage=usage,
+        glm_plan=glm_plan,
+        gpt_plan=gpt_plan,
+        cache_dict=cache_dict,
+        cache_hash=cache_hash,
+        collected_at=captured_at,
+    )
+
+
+async def _refresh_collection_cache(collection_cache: CollectionCache) -> None:
+    collected = await asyncio.to_thread(_collect_snapshot)
+    if collected:
+        await collection_cache.set(collected)
+
+
+async def _collection_loop(collection_cache: CollectionCache) -> None:
+    """每 30 秒后台采集一次，避免 BLE 窗口内等待接口返回。"""
+    while True:
+        await asyncio.sleep(COLLECT_INTERVAL_SECONDS)
+        try:
+            await _refresh_collection_cache(collection_cache)
+        except Exception:
+            logger.error("Collection refresh failed", exc_info=True)
 
 
 async def _read_device_status_for_cycle(transport: BLETransport) -> DeviceStatus:
     """先占住 BLE 唤醒窗口，再读取设备状态。"""
-    logger.info("Connecting to device...")
     await transport.connect()
     device_status = await transport.read_device_status()
     logger.info(
         f"Device: WiFi={'connected' if device_status.wifi_connected else 'disconnected'}, "
-        f"battery={device_status.battery_percent}%"
+        f"battery={device_status.battery_percent}%, "
+        f"force_full={int(device_status.force_full_refresh)}"
     )
     return device_status
 
 
-async def run_cycle(transport: BLETransport) -> None:
-    """Execute one complete collect-render-send cycle with cache check."""
-    device_status = None
-    refresh_mode = "FAST"
+def _is_synced_to_device(collected: CollectedSnapshot) -> bool:
+    last_cache = _load_last_cache()
+    return bool(last_cache and last_cache.get("hash") == collected.cache_hash)
 
-    if TOKEN_DASHBOARD_RENDER_MODE in ("bitmap", "firmware_render"):
-        device_status = await _read_device_status_for_cycle(transport)
 
-    usage, glm_plan, gpt_plan = _collect_cycle_inputs()
+def _must_push(device_status: DeviceStatus, synced: bool) -> bool:
+    if device_status.force_full_refresh:
+        return True
+    if TOKEN_DASHBOARD_RENDER_MODE == "firmware_render":
+        return not synced or not device_status.partial_baseline_ready
+    return not synced
 
-    if not glm_plan.available and not gpt_plan.available:
-        logger.warning("Both plans unavailable, skipping this cycle")
-        return
 
-    if TOKEN_DASHBOARD_RENDER_MODE == "firmware_render" and device_status:
+async def _handle_no_change(transport: BLETransport, collected: CollectedSnapshot) -> None:
+    logger.info(
+        "Device found, data unchanged, sending sleep command: "
+        f"{_format_cache_summary(collected.cache_dict, collected.cache_hash)}"
+    )
+    await transport.send_no_change_sleep()
+
+
+async def run_cycle(transport: BLETransport, collection_cache: CollectionCache) -> bool:
+    """连接设备后只使用预采集缓存完成本轮同步。"""
+    collected = await collection_cache.get()
+    if not collected:
+        logger.warning("No collection cache available, skipping BLE cycle")
+        return False
+
+    device_status = await _read_device_status_for_cycle(transport)
+    synced = _is_synced_to_device(collected)
+    if not _must_push(device_status, synced):
+        await _handle_no_change(transport, collected)
+        return True
+
+    refresh_mode = "FULL"
+    if TOKEN_DASHBOARD_RENDER_MODE == "firmware_render":
         refresh_mode = _select_refresh_mode(device_status)
         logger.info(f"Selected refresh mode: {refresh_mode}")
 
-    snapshot = _build_dashboard_snapshot(usage, glm_plan, gpt_plan, device_status, datetime.now())
-
-    cache_dict = _snapshot_to_cache_dict(snapshot)
-    cache_hash = _compute_cache_hash(cache_dict)
-    last_cache = _load_last_cache()
-
-    if last_cache and last_cache.get("hash") == cache_hash:
-        logger.info("Data unchanged from last cycle, skipping update")
-        return
-
-    logger.info("Data changed since last cycle, proceeding with update")
-    _save_cache(cache_dict, cache_hash)
+    logger.info(
+        "Data changed since last cycle, proceeding with update: "
+        f"{_format_cache_summary(collected.cache_dict, collected.cache_hash)}"
+    )
 
     # 真正发送前重新取一次时间，保证屏幕时间和 RTC 同步时间尽量贴近设备接收时刻。
-    snapshot = _build_dashboard_snapshot(usage, glm_plan, gpt_plan, device_status, datetime.now())
+    snapshot = _build_dashboard_snapshot(
+        collected.usage,
+        collected.glm_plan,
+        collected.gpt_plan,
+        device_status,
+        datetime.now(),
+    )
 
     if TOKEN_DASHBOARD_RENDER_MODE == "bitmap":
         success = await _run_bitmap_mode(transport, snapshot)
@@ -254,51 +357,66 @@ async def run_cycle(transport: BLETransport) -> None:
         success = await _run_firmware_render_mode(transport, snapshot, refresh_mode)
     else:
         logger.error(f"Unknown render mode: {TOKEN_DASHBOARD_RENDER_MODE}")
-        return
+        return False
 
+    if success:
+        _save_cache(collected.cache_dict, collected.cache_hash)
     logger.info(f"Update {'succeeded' if success else 'failed'}")
+    return success
 
 
-def calculate_next_aligned_time():
-    """Calculate next 5-minute mark and wait seconds."""
+def _seconds_until_next_device_window() -> float:
     now = datetime.now()
-    next_5_min = ((now.minute // 5) + 1) * 5
-    if next_5_min >= 60:
-        target = now.replace(hour=now.hour + 1, minute=0, second=0, microsecond=0)
-    else:
-        target = now.replace(minute=next_5_min, second=0, microsecond=0)
-    wait_seconds = (target - now).total_seconds()
-    return target, wait_seconds
+    elapsed = (
+        now.minute * 60 + now.second + now.microsecond / 1_000_000
+    ) % DEVICE_WAKE_INTERVAL_SECONDS
+    wait_seconds = DEVICE_WAKE_INTERVAL_SECONDS - elapsed
+    if wait_seconds <= POST_DEVICE_HANDLED_GUARD_SECONDS:
+        wait_seconds += DEVICE_WAKE_INTERVAL_SECONDS
+    return max(1.0, wait_seconds - POST_DEVICE_HANDLED_GUARD_SECONDS)
+
+
+async def _sleep_after_device_handled() -> None:
+    wait_seconds = _seconds_until_next_device_window()
+    logger.info(f"Device handled, pausing scan for {wait_seconds:.1f}s")
+    await asyncio.sleep(wait_seconds)
 
 
 async def main_loop() -> None:
-    """Main event loop with 5-minute refresh aligned to marks."""
+    """常驻扫描设备广播，发现唤醒窗口后执行一次推送。"""
     logger.info("Token 用量看板 started")
-    logger.info("Refresh aligned to 5-minute marks")
+    logger.info(f"Waiting for device broadcasts, scan timeout={BLE_SCAN_TIMEOUT_SECONDS:.1f}s")
 
     transport = BLETransport()
-
-    # Run first cycle immediately
+    collection_cache = CollectionCache()
     try:
-        await run_cycle(transport)
+        await _refresh_collection_cache(collection_cache)
     except Exception:
-        logger.error("First cycle failed", exc_info=True)
-    finally:
-        if transport.client and transport.client.is_connected:
-            await transport.disconnect()
+        logger.error("Initial collection failed", exc_info=True)
+    collection_task = asyncio.create_task(_collection_loop(collection_cache))
 
-    # Subsequent cycles: align to 5-minute marks
-    while True:
-        next_time, wait_seconds = calculate_next_aligned_time()
-        logger.info(f"Next update at {next_time.strftime('%H:%M:%S')} (waiting {wait_seconds:.1f}s)")
-        await asyncio.sleep(wait_seconds)
+    try:
+        while True:
+            device_handled = False
+            try:
+                device_handled = await run_cycle(transport, collection_cache)
+            except BLEDeviceNotFoundError:
+                logger.info(
+                    f"No device broadcast found in this {BLE_SCAN_TIMEOUT_SECONDS:.1f}s scan window"
+                )
+            except Exception:
+                logger.error("Cycle failed", exc_info=True)
+            finally:
+                if transport.client and transport.client.is_connected:
+                    await transport.disconnect()
+            if device_handled:
+                await _sleep_after_device_handled()
+    finally:
+        collection_task.cancel()
         try:
-            await run_cycle(transport)
-        except Exception:
-            logger.error("Cycle failed", exc_info=True)
-        finally:
-            if transport.client and transport.client.is_connected:
-                await transport.disconnect()
+            await collection_task
+        except asyncio.CancelledError:
+            pass
 
 
 def main():

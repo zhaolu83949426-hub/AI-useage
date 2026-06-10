@@ -42,6 +42,7 @@ extern bool g_bleConnected;
 extern bool g_advertisingRestartPending;
 extern bool g_rebootFlag;
 extern bool g_connectionRequested;
+extern bool g_forceFullRefresh;
 extern uint8_t g_mloopCounter;
 extern uint8_t g_msdPayload[16];
 extern PacketQueue<app::kCommandQueueSize, app::kMaxPacketSize> g_commandQueue;
@@ -49,6 +50,10 @@ extern PacketQueue<app::kResponseQueueSize, app::kMaxPacketSize> g_responseQueue
 extern DirectWriteState g_directWriteState;
 extern DashboardProtocolContext g_dashboardContext;
 extern DashboardRenderState g_dashboardRenderState;
+// 连续唤醒超时次数，跨深睡眠保留。
+extern uint8_t g_wakeTimeoutCount;
+// 达到超时上限后暂停周期唤醒，仅允许按键恢复。
+extern bool g_wakeCyclePaused;
 extern uint8_t g_requestedRefreshMode;
 extern DeferredJob g_deferredJob;
 extern uint32_t g_deferredJobReadyAtMs;

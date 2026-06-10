@@ -44,7 +44,11 @@ bool dashboard_parse_v1(const uint8_t* payload, uint32_t len, DashboardDataV1* d
     memcpy(data->glm_level, payload + offset, glm_len > 8 ? 8 : glm_len);
     offset += 8;
 
-    for (uint8_t i = 0; i < data->row_count && i < 4; i++) {
+    for (uint8_t i = 0; i < 4; i++) {
+        if (i >= data->row_count) {
+            offset += 33;
+            continue;
+        }
         memcpy(data->models[i].model, payload + offset, 24);
         offset += 24;
         data->models[i].provider_code = payload[offset++];

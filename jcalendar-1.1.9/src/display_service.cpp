@@ -15,6 +15,7 @@ GxEPD2_DISPLAY_CLASS<GxEPD2_DRIVER_CLASS, app::kDisplayPageHeight> display(
     GxEPD2_DRIVER_CLASS(app::kPinCs, app::kPinDc, app::kPinReset, app::kPinBusy)
 );
 U8G2_FOR_ADAFRUIT_GFX g_fonts;
+bool g_displayReady = false;
 
 constexpr uint16_t kWhite = GxEPD_WHITE;
 constexpr uint16_t kBlack = GxEPD_BLACK;
@@ -317,25 +318,27 @@ void finish_refresh(bool deep_sleep = true) {
     if (deep_sleep) display.hibernate();
 }
 
-}  // namespace
-
-void init_display_service() {
+void ensure_display_ready() {
+    if (g_displayReady) {
+        return;
+    }
     display.init(115200);
     display.setRotation(0);
     g_fonts.begin(display);
-    display.setFullWindow();
-    display.firstPage();
-    do {
-        display.fillScreen(kWhite);
-        draw_text(68, 155, "OpenDisplay Dashboard", FONT_BOOT, kBlack);
-    } while (display.nextPage());
-    finish_refresh();
+    g_displayReady = true;
+}
+
+}  // namespace
+
+void init_display_service() {
+    ensure_display_ready();
 }
 
 bool render_bitplane_image(const uint8_t* black_plane, const uint8_t* red_plane) {
     if (!black_plane || !red_plane) {
         return false;
     }
+    ensure_display_ready();
     display.setFullWindow();
     display.drawImage(black_plane, red_plane, 0, 0, app::kDisplayWidth, app::kDisplayHeight);
     finish_refresh();
@@ -343,6 +346,7 @@ bool render_bitplane_image(const uint8_t* black_plane, const uint8_t* red_plane)
 }
 
 bool render_dashboard_full(const DashboardDataV1& data) {
+    ensure_display_ready();
     uint8_t battery_pct = read_battery_percent();
     display.setFullWindow();
     display.firstPage();
@@ -356,6 +360,7 @@ bool render_dashboard_full(const DashboardDataV1& data) {
 
 bool render_dashboard_fast(const DashboardDataV1& data) {
 #if defined(SI_DRIVER) && (SI_DRIVER == 21)
+    ensure_display_ready();
     if (!g_dashboardRenderState.partial_baseline_ready) {
         return false;
     }

@@ -3,12 +3,13 @@
 import asyncio
 import logging
 import struct
+from datetime import datetime
 
 import bleak
 
 from ..config import (
     BLE_SERVICE_UUID, BLE_CHAR_UUID, BLE_DEVICE_NAME_PREFIX,
-    BLE_CHUNK_SIZE, PLANE_SIZE,
+    BLE_SCAN_TIMEOUT_SECONDS, BLE_CHUNK_SIZE, PLANE_SIZE,
     BATTERY_VOLTAGE_MAX, BATTERY_VOLTAGE_MIN,
 )
 from ..renderer.dashboard import DeviceStatus
@@ -25,10 +26,17 @@ CMD_DIRECT_WRITE_END = bytes([0x00, 0x72])
 CMD_DASHBOARD_RENDER_START = bytes([0x00, 0x78])
 CMD_DASHBOARD_RENDER_DATA = bytes([0x00, 0x79])
 CMD_DASHBOARD_RENDER_COMMIT = bytes([0x00, 0x7A])
+CMD_DASHBOARD_NO_CHANGE_SLEEP = bytes([0x00, 0x7D])
+
+MSD_EXTENSION_FORCE_FULL_REFRESH = 0x01
 
 
 class BLETransportError(Exception):
     pass
+
+
+class BLEDeviceNotFoundError(BLETransportError):
+    """本轮扫描未发现看板设备。"""
 
 
 class BLETransport:
@@ -41,13 +49,18 @@ class BLETransport:
 
     async def connect(self) -> None:
         """Scan for and connect to the ESP32 device."""
+        logger.info(
+            f"Scanning for BLE device prefix={BLE_DEVICE_NAME_PREFIX}, "
+            f"timeout={BLE_SCAN_TIMEOUT_SECONDS:.1f}s"
+        )
         device = await bleak.BleakScanner.find_device_by_filter(
             lambda d, _: d.name and d.name.startswith(BLE_DEVICE_NAME_PREFIX),
-            timeout=30.0,
+            timeout=BLE_SCAN_TIMEOUT_SECONDS,
         )
         if not device:
-            raise BLETransportError(f"Device not found (prefix={BLE_DEVICE_NAME_PREFIX})")
+            raise BLEDeviceNotFoundError(f"Device not found (prefix={BLE_DEVICE_NAME_PREFIX})")
 
+        logger.info(f"Found device {device.name}, connecting...")
         self.client = bleak.BleakClient(device, timeout=15.0)
         await self.client.connect()
         for attempt in range(3):
@@ -95,17 +108,28 @@ class BLETransport:
             battery_pct = 0
             partial_baseline_ready = False
 
-        # Check for wifi_connected byte (firmware extension)
+        # Check extension flags byte
         wifi_connected = False
+        force_full_refresh = False
         if len(resp) >= 19:
-            wifi_connected = resp[18] == 0x01
+            force_full_refresh = bool(resp[18] & MSD_EXTENSION_FORCE_FULL_REFRESH)
 
         return DeviceStatus(
             wifi_connected=wifi_connected,
             battery_percent=battery_pct,
             available=True,
             partial_baseline_ready=partial_baseline_ready,
+            force_full_refresh=force_full_refresh,
         )
+
+    async def send_no_change_sleep(self) -> None:
+        """通知设备本轮数据无变化，可立即进入深睡眠。"""
+        now = datetime.now()
+        payload = CMD_DASHBOARD_NO_CHANGE_SLEEP + bytes([now.hour, now.minute, now.second])
+        resp = await self._send_command(payload, timeout=10.0)
+        if resp[0] != 0x00 or resp[1] != 0x7D:
+            raise BLETransportError(f"DASHBOARD_NO_CHANGE_SLEEP failed: {resp.hex()}")
+        logger.info("No-change sleep acknowledged")
 
     async def send_3color_image(self, black_plane: bytes, red_plane: bytes) -> bool:
         """Send a 3-color image to the display.
