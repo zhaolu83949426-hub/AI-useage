@@ -167,6 +167,10 @@ def _sanitize_model_name(name: str) -> str:
     if not isinstance(name, str):
         name = str(name)
 
+    # Remove "claude-" prefix to shorten display
+    if name.startswith("claude-"):
+        name = name[7:]
+
     # Replace common non-ASCII model names with ASCII aliases
     aliases = {
         "文心一言": "ernie",

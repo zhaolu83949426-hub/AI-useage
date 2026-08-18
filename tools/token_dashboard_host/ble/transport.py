@@ -49,6 +49,9 @@ class BLETransport:
 
     async def connect(self) -> None:
         """Scan for and connect to the ESP32 device."""
+        # 清理上一次失败的连接资源，避免 Windows BLE 堆栈资源泄漏
+        await self.disconnect()
+
         logger.info(
             f"Scanning for BLE device prefix={BLE_DEVICE_NAME_PREFIX}, "
             f"timeout={BLE_SCAN_TIMEOUT_SECONDS:.1f}s"
@@ -62,7 +65,13 @@ class BLETransport:
 
         logger.info(f"Found device {device.name}, connecting...")
         self.client = bleak.BleakClient(device, timeout=15.0)
-        await self.client.connect()
+        try:
+            await self.client.connect()
+        except Exception:
+            # 连接失败时确保释放 WinRT BLE 底层资源
+            await self.disconnect()
+            raise
+
         for attempt in range(3):
             try:
                 await self.client.start_notify(BLE_CHAR_UUID, self._on_notification)
@@ -73,17 +82,30 @@ class BLETransport:
                     logger.warning(f"Characteristic not found, retrying ({attempt+1}/3)...")
                     await asyncio.sleep(2)
                     continue
+                await self.disconnect()
                 raise
 
     async def disconnect(self) -> None:
-        """Disconnect from the device."""
-        if self.client and self.client.is_connected:
+        """Disconnect from the device and release BLE resources."""
+        if not self.client:
+            return
+        try:
+            if self.client.is_connected:
+                try:
+                    await self.client.stop_notify(BLE_CHAR_UUID)
+                except Exception:
+                    pass
+                await self.client.disconnect()
+                logger.info("Disconnected")
+        except Exception:
+            pass
+        finally:
+            # 确保底层 WinRT BluetoothLEDevice 资源释放
+            # 即使连接未建立，BleakClient 也可能持有未释放的 WinRT 对象
             try:
-                await self.client.stop_notify(BLE_CHAR_UUID)
+                self.client = None
             except Exception:
                 pass
-            await self.client.disconnect()
-            logger.info("Disconnected")
 
     async def read_device_status(self) -> DeviceStatus:
         """Read battery voltage and WiFi status via READ_MSD command."""

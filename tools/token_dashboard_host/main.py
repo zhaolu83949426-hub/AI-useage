@@ -406,7 +406,10 @@ async def main_loop() -> None:
                 )
             except Exception:
                 logger.error("Cycle failed", exc_info=True)
-            finally:
+                await transport.disconnect()
+                # 连接失败后重建 transport，释放累积的 WinRT BLE 资源
+                transport = BLETransport()
+            else:
                 if transport.client and transport.client.is_connected:
                     await transport.disconnect()
             if device_handled:
