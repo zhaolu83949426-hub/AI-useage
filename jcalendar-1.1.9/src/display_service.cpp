@@ -193,17 +193,17 @@ void trim_model_name(const char* source, char* target, size_t size) {
 void draw_model_table(const DashboardDataV1& data) {
     display.drawRoundRect(8, 166, 384, 106, 4, kBlack);
     display.drawLine(8, 188, 392, 188, kBlack);
-    display.drawLine(100, 188, 100, 272, kBlack);
-    display.drawLine(156, 188, 156, 272, kBlack);
-    display.drawLine(242, 188, 242, 272, kBlack);
+    display.drawLine(131, 188, 131, 272, kBlack);
+    display.drawLine(187, 188, 187, 272, kBlack);
+    display.drawLine(258, 188, 258, 272, kBlack);
 
     draw_text(14, 183, "MODEL", FONT_LABEL, kBlack);
-    draw_text(108, 183, "CALLS", FONT_LABEL, kBlack);
-    draw_text(164, 183, "TOKEN", FONT_LABEL, kBlack);
-    draw_text(250, 183, "SHARE", FONT_LABEL, kBlack);
+    draw_text(139, 183, "CALLS", FONT_LABEL, kBlack);
+    draw_text(195, 183, "TOKEN", FONT_LABEL, kBlack);
+    draw_text(266, 183, "SHARE", FONT_LABEL, kBlack);
 
     for (uint8_t i = 0; i < data.row_count && i < 4; i++) {
-        char name[17], token_text[16], share_text[8], calls_text[8];
+        char name[21], token_text[16], share_text[8], calls_text[8];
         trim_model_name(data.models[i].model, name, sizeof(name));
         format_tokens(token_text, data.models[i].total_tokens);
         format_percent(share_text, data.models[i].share_bp);
@@ -215,15 +215,15 @@ void draw_model_table(const DashboardDataV1& data) {
         }
 
         draw_text(14, row_top + 12, name, FONT_SMALL, kBlack);
-        draw_text(108, row_top + 12, calls_text, FONT_SMALL, kBlack);
-        draw_text(164, row_top + 12, token_text, FONT_SMALL, kBlack);
+        draw_text(139, row_top + 12, calls_text, FONT_SMALL, kBlack);
+        draw_text(195, row_top + 12, token_text, FONT_SMALL, kBlack);
 
-        display.drawRoundRect(250, row_top + 3, 72, 8, 2, kBlack);
-        int fill_width = (72 - 2) * (data.models[i].share_bp / 100.0f) / 100.0f;
+        display.drawRoundRect(266, row_top + 3, 60, 8, 2, kBlack);
+        int fill_width = (60 - 2) * (data.models[i].share_bp / 100.0f) / 100.0f;
         if (fill_width > 0) {
-            display.fillRect(251, row_top + 4, fill_width, 6, kBlack);
+            display.fillRect(267, row_top + 4, fill_width, 6, kBlack);
         }
-        draw_text(330, row_top + 12, share_text, FONT_SMALL, kBlack);
+        draw_text(334, row_top + 12, share_text, FONT_SMALL, kBlack);
     }
 }
 
@@ -315,7 +315,10 @@ void commit_render_state(const DashboardDataV1& data, uint8_t battery_percent, b
 
 void finish_refresh(bool deep_sleep = true) {
     display.powerOff();
-    if (deep_sleep) display.hibernate();
+    if (deep_sleep) {
+        display.hibernate();
+        g_displayReady = false;
+    }
 }
 
 void ensure_display_ready() {
@@ -332,6 +335,13 @@ void ensure_display_ready() {
 
 void init_display_service() {
     ensure_display_ready();
+}
+
+void prepare_display_for_sleep() {
+    if (!g_displayReady) {
+        return;
+    }
+    finish_refresh();
 }
 
 bool render_bitplane_image(const uint8_t* black_plane, const uint8_t* red_plane) {

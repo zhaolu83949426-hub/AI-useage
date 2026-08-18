@@ -15,3 +15,4 @@ void mark_sleep_after_render();
 void mark_sleep_without_render();
 void notify_dashboard_data(const DashboardDataV1& data);
 void notify_dashboard_time(uint8_t hour, uint8_t minute, uint8_t second);
+bool is_plugged_in();

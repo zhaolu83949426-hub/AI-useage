@@ -21,10 +21,10 @@ static volatile bool g_buttonPressed = false;
 static uint32_t g_lastButtonPressMs = 0;
 // RTC 数据：深睡前标记是否处于时间同步模式（跨深睡眠保留）
 RTC_DATA_ATTR static bool g_rtcTimeSyncMode = false;
-// 上次 RTC 同步的时间戳（跨深睡眠保留）
-RTC_DATA_ATTR static time_t g_rtcLastSyncTime = 0;
 // 按钮唤醒后保留等待推送状态
 RTC_DATA_ATTR static bool g_rtcWaitNextPushAfterButton = false;
+// 首次开机是否已经同步过时间（跨深睡眠保留）
+RTC_DATA_ATTR static bool g_rtcTimeSynced = false;
 
 static void IRAM_ATTR handle_button_interrupt() {
     g_buttonPressed = true;
@@ -45,6 +45,7 @@ static bool has_active_push_session() {
 
 static void enter_button_resume_sleep() {
     Serial.println("Entering deep sleep until button wakeup");
+    prepare_display_for_sleep();
     Serial.flush();
     esp_sleep_enable_ext0_wakeup(KEY_M, 0);
     esp_deep_sleep_start();
@@ -86,17 +87,9 @@ static void sync_rtc_from_dashboard(const DashboardDataV1& data) {
     time_t corrected = mktime(&tm_info);
     struct timeval tv = { .tv_sec = corrected, .tv_usec = 0 };
     settimeofday(&tv, nullptr);
-    g_rtcLastSyncTime = time(nullptr);
+    g_rtcTimeSynced = true;
     Serial.printf("RTC synced from dashboard: %02d:%02d:%02d\n",
                   data.sync_hour, data.sync_minute, data.sync_second);
-
-    // 首次同步后激活周期唤醒模式
-    if (!g_timeSyncMode && !g_waitNextPushAfterButton) {
-        g_timeSyncMode = true;
-        g_wakeDeadlineMs = millis() + app::kWakeWindowSec * 1000;
-        g_sleepAfterRender = false;
-        Serial.println("RTC synced, time sync mode activated");
-    }
 }
 
 // 计算到下一个5分钟整点的秒数
@@ -143,7 +136,13 @@ static uint32_t seconds_to_next_wake() {
 }
 
 static void enter_deep_sleep(uint32_t sleep_sec) {
+    if (is_plugged_in()) {
+        Serial.println("Device plugged in, skipping deep sleep");
+        g_sleepAfterRender = false;
+        return;
+    }
     Serial.printf("Entering deep sleep for %lus\n", static_cast<unsigned long>(sleep_sec));
+    prepare_display_for_sleep();
     Serial.flush();
     esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(sleep_sec) * 1000000ULL);
     esp_sleep_enable_ext0_wakeup(KEY_M, 0);
@@ -189,6 +188,10 @@ static bool should_continue_night_sleep(bool timer_wakeup) {
         return false;
     }
 
+    if (!g_rtcTimeSynced) {
+        return false;
+    }
+
     time_t now = time(nullptr);
     struct tm tm_info = {};
     localtime_r(&now, &tm_info);
@@ -200,31 +203,17 @@ static void configure_power_saving_mode() {
         g_timeSyncMode = false;
         return;
     }
-
     g_timeSyncMode = !g_waitNextPushAfterButton;
-    if (!g_timeSyncMode) {
-        return;
-    }
-
-    time_t now = time(nullptr);
-    struct tm tm_info = {};
-    localtime_r(&now, &tm_info);
-
-    // RTC 未初始化或同步过期时保持唤醒，等待主机推送重新校时。
-    bool rtc_valid = (tm_info.tm_year >= (2024 - 1900));
-    bool sync_recent = (g_rtcLastSyncTime > 0 && (now - g_rtcLastSyncTime) <= (3 * 86400));
-    if (rtc_valid && sync_recent) {
-        return;
-    }
-
-    g_timeSyncMode = false;
-    Serial.printf("RTC not ready (valid=%d, sync_age=%lus), staying awake for time sync\n",
-                  rtc_valid,
-                  g_rtcLastSyncTime > 0 ? static_cast<unsigned long>(now - g_rtcLastSyncTime) : 0);
 }
 
 static bool enter_night_sleep_if_needed() {
     if (!g_timeSyncMode) {
+        return false;
+    }
+
+    if (!g_rtcTimeSynced) {
+        Serial.println("Time not synced yet, skipping sleep");
+        g_sleepAfterRender = false;
         return false;
     }
 
@@ -239,6 +228,12 @@ static bool enter_night_sleep_if_needed() {
         return false;
     }
 
+    if (is_plugged_in()) {
+        Serial.println("Device plugged in, skipping night sleep");
+        g_sleepAfterRender = false;
+        return false;
+    }
+
     Serial.println("Night mode: sleeping until morning");
     g_rtcTimeSyncMode = true;
     uint32_t sleep_sec = seconds_to_next_wake();
@@ -249,6 +244,13 @@ static bool enter_night_sleep_if_needed() {
 static void handle_wake_window_expired() {
     // 一旦进入 BLE 会话或已开始渲染，就必须等本轮处理完成后再睡。
     if (has_active_push_session()) {
+        return;
+    }
+
+    if (!g_rtcTimeSynced) {
+        Serial.println("Time not synced yet, wake window expired but staying awake");
+        reset_wake_timeout_state();
+        g_wakeDeadlineMs = millis() + app::kWakeWindowSec * 1000;
         return;
     }
 
@@ -287,6 +289,7 @@ void setup() {
     setup_button();
     init_protocol_state();
     init_ble_service();
+    init_display_service();
 
     g_waitNextPushAfterButton = g_rtcWaitNextPushAfterButton;
     if (button_wakeup) {

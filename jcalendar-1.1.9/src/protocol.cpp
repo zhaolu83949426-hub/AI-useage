@@ -290,3 +290,8 @@ void process_deferred_job() {
         mark_sleep_after_render();
     }
 }
+
+bool is_plugged_in() {
+    float voltage = read_battery_voltage();
+    return voltage > 4.15f;
+}
